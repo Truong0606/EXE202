@@ -59,6 +59,13 @@ flutter:
 
   assets:
     - assets/images/
+    - assets/images/homepage/
+    - assets/images/homepage/Mascot Hello 1 1.png
+    - assets/images/homepage/Mascot Head 2 3.png
+    - assets/images/homepage/Mascot Talk 1 1.png
+    - assets/images/homepage/Group 46.png
+    - assets/images/homepage/Group 47.png
+    - assets/images/homepage/basil_camera-solid.png
 
   # To add assets to your application, add an assets section, like this:
   # assets:

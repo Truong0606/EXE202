@@ -1,5 +1,6 @@
 import 'package:first_app/core/theme/app_colors.dart';
 import 'package:first_app/core/widgets/primary_pill_button.dart';
+import 'package:first_app/navigation/app_routes.dart';
 import 'package:flutter/material.dart';
 
 class ForgotRecordPromptPage extends StatelessWidget {
@@ -45,7 +46,9 @@ class ForgotRecordPromptPage extends StatelessWidget {
               const Spacer(),
               PrimaryPillButton(
                 label: 'Tiếp tục',
-                onPressed: () {},
+                onPressed: () {
+                  Navigator.of(context).pushNamed(AppRoutes.trackEasyBenefits);
+                },
               ),
             ],
           ),

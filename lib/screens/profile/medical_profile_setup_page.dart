@@ -16,6 +16,7 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
   bool? isFemale;
   DateTime? selectedBirthDate;
   final TextEditingController nameController = TextEditingController();
+  final TextEditingController emailController = TextEditingController();
   final TextEditingController birthDateController = TextEditingController();
 
   Future<void> _pickBirthDate() async {
@@ -55,6 +56,7 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
   @override
   void dispose() {
     nameController.dispose();
+    emailController.dispose();
     birthDateController.dispose();
     super.dispose();
   }
@@ -102,6 +104,32 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
                   decoration: const InputDecoration(
                     border: InputBorder.none,
                     hintText: 'Nhập tên của bạn',
+                    hintStyle: TextStyle(
+                      color: AppColors.hintBlue,
+                      fontSize: 28,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Container(
+                width: double.infinity,
+                height: 62,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(32),
+                  border: Border.all(color: AppColors.mediumGray),
+                ),
+                child: TextField(
+                  controller: emailController,
+                  keyboardType: TextInputType.emailAddress,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: AppColors.primaryBlue,
+                    fontSize: 34,
+                  ),
+                  decoration: const InputDecoration(
+                    border: InputBorder.none,
+                    hintText: 'Nhập email của bạn',
                     hintStyle: TextStyle(
                       color: AppColors.hintBlue,
                       fontSize: 28,
