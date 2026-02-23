@@ -58,9 +58,7 @@ flutter:
   uses-material-design: true
 
   assets:
-    - assets/images/glucare_logo.png
-    - assets/images/glucare_text.png
-    - assets/images/mascot_talk_4.png
+    - assets/images/
 
   # To add assets to your application, add an assets section, like this:
   # assets:
