@@ -37,7 +37,7 @@ class ReadyStartPage extends StatelessWidget {
                 label: 'Bắt đầu ngay',
                 onPressed: () {
                   Navigator.of(context).pushNamedAndRemoveUntil(
-                    AppRoutes.home,
+                    AppRoutes.login,
                     (route) => false,
                   );
                 },

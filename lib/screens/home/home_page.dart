@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:first_app/core/models/dashboard_models.dart';
+import 'package:first_app/core/services/auth_storage_service.dart';
+import 'package:first_app/core/services/backend_api_service.dart';
 import 'package:first_app/core/services/notification_service.dart';
 import 'package:first_app/core/theme/app_colors.dart';
 import 'package:first_app/navigation/app_routes.dart';
@@ -10,10 +13,7 @@ import 'package:flutter/services.dart';
 part 'home_page_extras.dart';
 
 class HomePage extends StatefulWidget {
-  const HomePage({
-    super.key,
-    this.initialTabIndex = 0,
-  });
+  const HomePage({super.key, this.initialTabIndex = 0});
 
   final int initialTabIndex;
 
@@ -22,12 +22,80 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  final BackendApiService _backendApiService = BackendApiService.instance;
+
   late int currentTabIndex;
+  String _displayName = 'GluCare';
+  BlogArticleData? _blogArticle;
+  List<FollowMemberData> _followMembers = const <FollowMemberData>[];
 
   @override
   void initState() {
     super.initState();
     currentTabIndex = widget.initialTabIndex.clamp(0, 4);
+    unawaited(_initializeHome());
+  }
+
+  Future<void> _initializeHome() async {
+    final bool hasSession = await _ensureAuthenticatedSession();
+    if (!hasSession) {
+      return;
+    }
+
+    await Future.wait<void>(<Future<void>>[
+      _loadDashboardApiData(),
+      _loadCurrentUserProfile(),
+    ]);
+  }
+
+  Future<void> _loadCurrentUserProfile() async {
+    final UserProfileData? userProfile = await _backendApiService
+        .fetchCurrentUserProfile();
+    if (!mounted || userProfile == null) {
+      return;
+    }
+
+    final String fullName = userProfile.fullName.trim();
+    if (fullName.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _displayName = fullName;
+    });
+  }
+
+  Future<bool> _ensureAuthenticatedSession() async {
+    final String token =
+        (await AuthStorageService.instance.getAccessToken())?.trim() ?? '';
+    if (token.isNotEmpty) {
+      return true;
+    }
+
+    if (!mounted) {
+      return false;
+    }
+
+    Navigator.of(
+      context,
+    ).pushNamedAndRemoveUntil(AppRoutes.login, (route) => false);
+    return false;
+  }
+
+  Future<void> _loadDashboardApiData() async {
+    final BlogArticleData? article = await _backendApiService
+        .fetchLatestBlogArticle();
+    final List<FollowMemberData> members = await _backendApiService
+        .fetchFollowMembers();
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _blogArticle = article;
+      _followMembers = members;
+    });
   }
 
   @override
@@ -39,13 +107,14 @@ class _HomePageState extends State<HomePage> {
           index: currentTabIndex,
           children: [
             _DashboardTab(
+              displayName: _displayName,
               onOpenAiTab: () {
                 setState(() {
                   currentTabIndex = 2;
                 });
               },
             ),
-            const _DiaryTab(),
+            _DiaryTab(followMembers: _followMembers),
             _AiAssistantTab(
               onBackToHome: () {
                 setState(() {
@@ -59,8 +128,9 @@ class _HomePageState extends State<HomePage> {
                   currentTabIndex = 0;
                 });
               },
+              article: _blogArticle,
             ),
-            const _PlaceholderTab(title: 'Tài khoản'),
+            const _AccountTab(),
           ],
         ),
       ),
@@ -77,9 +147,13 @@ class _HomePageState extends State<HomePage> {
 }
 
 class _DashboardTab extends StatefulWidget {
-  const _DashboardTab({required this.onOpenAiTab});
+  const _DashboardTab({
+    required this.onOpenAiTab,
+    required this.displayName,
+  });
 
   final VoidCallback onOpenAiTab;
+  final String displayName;
 
   @override
   State<_DashboardTab> createState() => _DashboardTabState();
@@ -122,8 +196,9 @@ class _DashboardTabState extends State<_DashboardTab> {
   }
 
   void _addRealtimeGlucosePoint() {
-    final double previous =
-        _glucose24hPoints.isNotEmpty ? _glucose24hPoints.last : _lastMockValue;
+    final double previous = _glucose24hPoints.isNotEmpty
+        ? _glucose24hPoints.last
+        : _lastMockValue;
     final double delta = (_random.nextDouble() * 14) - 7;
     final double nextValue = (previous + delta).clamp(72, 220);
 
@@ -145,7 +220,11 @@ class _DashboardTabState extends State<_DashboardTab> {
     final int daysInMonth = DateTime(month.year, month.month + 1, 0).day;
 
     final int leadingEmpty = (firstDay.weekday + 6) % 7;
-    final List<int?> cells = List<int?>.filled(leadingEmpty, null, growable: true);
+    final List<int?> cells = List<int?>.filled(
+      leadingEmpty,
+      null,
+      growable: true,
+    );
     cells.addAll(List<int?>.generate(daysInMonth, (index) => index + 1));
 
     while (cells.length % 7 != 0) {
@@ -158,8 +237,11 @@ class _DashboardTabState extends State<_DashboardTab> {
     setState(() {
       displayedMonth = DateTime(displayedMonth.year, displayedMonth.month - 1);
       final int day = selectedDate.day;
-      final int maxDay =
-          DateTime(displayedMonth.year, displayedMonth.month + 1, 0).day;
+      final int maxDay = DateTime(
+        displayedMonth.year,
+        displayedMonth.month + 1,
+        0,
+      ).day;
       selectedDate = DateTime(
         displayedMonth.year,
         displayedMonth.month,
@@ -171,8 +253,10 @@ class _DashboardTabState extends State<_DashboardTab> {
   void _goToNextMonth() {
     final DateTime now = DateTime.now();
     final DateTime latestAllowed = DateTime(now.year, now.month);
-    final DateTime nextMonth =
-        DateTime(displayedMonth.year, displayedMonth.month + 1);
+    final DateTime nextMonth = DateTime(
+      displayedMonth.year,
+      displayedMonth.month + 1,
+    );
     if (nextMonth.isAfter(latestAllowed)) {
       return;
     }
@@ -180,8 +264,11 @@ class _DashboardTabState extends State<_DashboardTab> {
     setState(() {
       displayedMonth = nextMonth;
       final int day = selectedDate.day;
-      final int maxDay =
-          DateTime(displayedMonth.year, displayedMonth.month + 1, 0).day;
+      final int maxDay = DateTime(
+        displayedMonth.year,
+        displayedMonth.month + 1,
+        0,
+      ).day;
       selectedDate = DateTime(
         displayedMonth.year,
         displayedMonth.month,
@@ -200,7 +287,15 @@ class _DashboardTabState extends State<_DashboardTab> {
     ).isAtSameMomentAs(latestAllowedMonth);
     final int latestGlucose = _lastMockValue.round();
     final List<int?> calendarCells = _buildCalendarCells(displayedMonth);
-    const List<String> weekdays = ['Th.2', 'Th.3', 'Th.4', 'Th.5', 'Th.6', 'Th.7', 'CN'];
+    const List<String> weekdays = [
+      'Th.2',
+      'Th.3',
+      'Th.4',
+      'Th.5',
+      'Th.6',
+      'Th.7',
+      'CN',
+    ];
 
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(8, 0, 8, 0),
@@ -228,9 +323,9 @@ class _DashboardTabState extends State<_DashboardTab> {
                       height: 56,
                     ),
                     const SizedBox(width: 10),
-                    const Expanded(
+                    Expanded(
                       child: Text(
-                        'Xin chào,\nGluCare',
+                        'Xin chào,\n${widget.displayName}',
                         style: TextStyle(
                           color: Colors.white,
                           fontSize: 20,
@@ -288,7 +383,10 @@ class _DashboardTabState extends State<_DashboardTab> {
               children: [
                 Container(
                   width: double.infinity,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
                   decoration: BoxDecoration(
                     gradient: const LinearGradient(
                       begin: Alignment.centerLeft,
@@ -298,7 +396,10 @@ class _DashboardTabState extends State<_DashboardTab> {
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
                     decoration: BoxDecoration(
                       gradient: const LinearGradient(
                         begin: Alignment.centerLeft,
@@ -555,7 +656,10 @@ class _DashboardTabState extends State<_DashboardTab> {
                 const SizedBox(height: 10),
                 Container(
                   width: double.infinity,
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(14),
                     gradient: const LinearGradient(
@@ -589,7 +693,8 @@ class _DashboardTabState extends State<_DashboardTab> {
                         Transform.translate(
                           offset: const Offset(-5, -4),
                           child: const _SafeAssetImage(
-                            path: 'assets/images/homepage/basil_camera-solid.png',
+                            path:
+                                'assets/images/homepage/basil_camera-solid.png',
                             width: 12,
                             height: 12,
                           ),
@@ -684,11 +789,11 @@ class _DashboardTabState extends State<_DashboardTab> {
                         itemCount: calendarCells.length,
                         gridDelegate:
                             const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 7,
-                          mainAxisSpacing: 4,
-                          crossAxisSpacing: 4,
-                          childAspectRatio: 1.45,
-                        ),
+                              crossAxisCount: 7,
+                              mainAxisSpacing: 4,
+                              crossAxisSpacing: 4,
+                              childAspectRatio: 1.45,
+                            ),
                         itemBuilder: (context, index) {
                           final int? day = calendarCells[index];
                           final bool selected =
@@ -754,10 +859,7 @@ class _DashboardTabState extends State<_DashboardTab> {
 }
 
 class _HomeCard extends StatelessWidget {
-  const _HomeCard({
-    required this.child,
-    this.trailing,
-  });
+  const _HomeCard({required this.child, this.trailing});
 
   final Widget child;
   final Widget? trailing;
@@ -779,10 +881,7 @@ class _HomeCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           Expanded(child: child),
-          if (trailing != null) ...[
-            const SizedBox(width: 8),
-            trailing!,
-          ],
+          if (trailing != null) ...[const SizedBox(width: 8), trailing!],
         ],
       ),
     );
@@ -1017,10 +1116,7 @@ class _GoalProgressRingPainter extends CustomPainter {
 }
 
 class _HomeBottomNav extends StatelessWidget {
-  const _HomeBottomNav({
-    required this.currentIndex,
-    required this.onSelected,
-  });
+  const _HomeBottomNav({required this.currentIndex, required this.onSelected});
 
   final int currentIndex;
   final ValueChanged<int> onSelected;
@@ -1150,6 +1246,97 @@ class _PlaceholderTab extends StatelessWidget {
           color: AppColors.deepBlue,
           fontSize: 22,
           fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+}
+
+class _AccountTab extends StatefulWidget {
+  const _AccountTab();
+
+  @override
+  State<_AccountTab> createState() => _AccountTabState();
+}
+
+class _AccountTabState extends State<_AccountTab> {
+  bool _isLoggingOut = false;
+
+  Future<void> _logout() async {
+    if (_isLoggingOut) {
+      return;
+    }
+
+    setState(() {
+      _isLoggingOut = true;
+    });
+
+    try {
+      await AuthStorageService.instance.clearSession();
+      if (!mounted) {
+        return;
+      }
+      Navigator.of(
+        context,
+      ).pushNamedAndRemoveUntil(AppRoutes.login, (route) => false);
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Không thể đăng xuất, vui lòng thử lại')),
+      );
+      setState(() {
+        _isLoggingOut = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Tài khoản',
+              style: TextStyle(
+                color: AppColors.deepBlue,
+                fontSize: 34,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 24),
+            SizedBox(
+              width: 220,
+              child: ElevatedButton(
+                onPressed: _isLoggingOut ? null : _logout,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.primaryBlue,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                child: _isLoggingOut
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Text(
+                        'Đăng xuất tạm thời',
+                        style: TextStyle(fontWeight: FontWeight.w700),
+                      ),
+              ),
+            ),
+          ],
         ),
       ),
     );

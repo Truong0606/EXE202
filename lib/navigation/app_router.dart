@@ -28,6 +28,16 @@ class ProfileGreetingRouteArgs {
   final String name;
 }
 
+class MedicalProfileSetupRouteArgs {
+  const MedicalProfileSetupRouteArgs({
+    required this.phoneNumber,
+    required this.password,
+  });
+
+  final String phoneNumber;
+  final String password;
+}
+
 class AppRouter {
   static Route<dynamic> onGenerateRoute(RouteSettings settings) {
     switch (settings.name) {
@@ -48,9 +58,11 @@ class AppRouter {
           settings: settings,
         );
       case AppRoutes.medicalProfileSetup:
+        final MedicalProfileSetupRouteArgs? args =
+            settings.arguments as MedicalProfileSetupRouteArgs?;
         return _buildFadeRoute(
           settings: settings,
-          child: const MedicalProfileSetupPage(),
+          child: MedicalProfileSetupPage(args: args),
         );
       case AppRoutes.profileGreeting:
         final ProfileGreetingRouteArgs args =
@@ -118,10 +130,8 @@ class AppRouter {
     return PageRouteBuilder<void>(
       settings: settings,
       transitionDuration: const Duration(milliseconds: 300),
-      pageBuilder: (_, animation, __) => FadeTransition(
-        opacity: animation,
-        child: child,
-      ),
+      pageBuilder: (_, animation, __) =>
+          FadeTransition(opacity: animation, child: child),
     );
   }
 }

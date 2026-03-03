@@ -1,8 +1,11 @@
+import 'package:first_app/core/services/backend_api_service.dart';
+import 'package:first_app/core/services/auth_storage_service.dart';
 import 'package:first_app/core/theme/app_colors.dart';
 import 'package:first_app/core/theme/app_text_styles.dart';
-import 'package:first_app/navigation/app_routes.dart';
 import 'package:first_app/core/widgets/glucare_brand_header.dart';
 import 'package:first_app/core/widgets/primary_pill_button.dart';
+import 'package:first_app/navigation/app_router.dart';
+import 'package:first_app/navigation/app_routes.dart';
 import 'package:flutter/material.dart';
 
 class RegisterPage extends StatefulWidget {
@@ -20,18 +23,24 @@ class RegisterPage extends StatefulWidget {
 }
 
 class _RegisterPageState extends State<RegisterPage> {
+  final BackendApiService _backendApiService = BackendApiService.instance;
+  final AuthStorageService _authStorageService = AuthStorageService.instance;
+
   bool acceptedTerms = false;
   bool isValidPhone = false;
-  bool isOtpStep = false;
-  bool isValidOtp = false;
+  bool isPasswordStep = false;
+  bool isValidPassword = false;
+  bool isSubmitting = false;
 
   final TextEditingController phoneController = TextEditingController();
-  final TextEditingController otpController = TextEditingController();
+  final TextEditingController passwordController = TextEditingController();
+
+  int get _minPasswordLength => widget.continueToProfileSetup ? 8 : 6;
 
   @override
   void dispose() {
     phoneController.dispose();
-    otpController.dispose();
+    passwordController.dispose();
     super.dispose();
   }
 
@@ -67,36 +76,93 @@ class _RegisterPageState extends State<RegisterPage> {
     return localPhone;
   }
 
-  void _onContinuePressed() {
-    if (!isOtpStep) {
+  Future<void> _onContinuePressed() async {
+    if (!isPasswordStep) {
       if (!isValidPhone) {
         return;
       }
       setState(() {
-        isOtpStep = true;
+        isPasswordStep = true;
         acceptedTerms = true;
-        otpController.text = '0000';
-        isValidOtp = true;
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Đăng nhập thành công')),
+            );
       });
       return;
     }
 
-    if (otpController.text.trim() == '0000') {
-      if (widget.continueToProfileSetup) {
-        Navigator.of(context).pushNamed(AppRoutes.medicalProfileSetup);
-        return;
-      }
+    if (!isValidPassword || isSubmitting) {
+      return;
+    }
 
-      Navigator.of(context).pushNamedAndRemoveUntil(
-        AppRoutes.home,
-        (route) => false,
+    final String phone = _toLocalPhone(phoneController.text.trim());
+    final String password = passwordController.text.trim();
+
+    if (password.length < _minPasswordLength) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            widget.continueToProfileSetup
+                ? 'Mật khẩu phải có ít nhất 8 ký tự'
+                : 'Mật khẩu chưa hợp lệ',
+          ),
+        ),
       );
       return;
     }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Mã OTP không đúng, vui lòng thử lại')),
-    );
+    setState(() {
+      isSubmitting = true;
+    });
+
+    try {
+      if (!widget.continueToProfileSetup) {
+        final Map<String, dynamic> response = await _backendApiService
+            .loginUser(phoneNumber: phone, password: password);
+
+        final Map<String, dynamic> data =
+            (response['data'] as Map<String, dynamic>?) ??
+            const <String, dynamic>{};
+        await _authStorageService.saveSession(
+          accessToken: (data['accessToken'] ?? '').toString(),
+          refreshToken: (data['refreshToken'] ?? '').toString(),
+          userId: (data['userId'] ?? '').toString(),
+          role: (data['role'] ?? '').toString(),
+        );
+
+        if (!mounted) {
+          return;
+        }
+
+        Navigator.of(
+          context,
+        ).pushNamedAndRemoveUntil(AppRoutes.home, (route) => false);
+        return;
+      }
+
+      Navigator.of(context).pushNamed(
+        AppRoutes.medicalProfileSetup,
+        arguments: MedicalProfileSetupRouteArgs(
+          phoneNumber: phone,
+          password: password,
+        ),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error.toString().replaceFirst('Exception: ', '')),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          isSubmitting = false;
+        });
+      }
+    }
   }
 
   void _toggleTerms() {
@@ -117,10 +183,7 @@ class _RegisterPageState extends State<RegisterPage> {
           onPressed: () => Navigator.of(context).pop(),
           icon: const Icon(Icons.arrow_back_ios_new, color: Colors.white),
         ),
-        title: Text(
-          widget.title,
-          style: AppTextStyles.appBarTitle,
-        ),
+        title: Text(widget.title, style: AppTextStyles.appBarTitle),
       ),
       body: SafeArea(
         top: false,
@@ -129,11 +192,7 @@ class _RegisterPageState extends State<RegisterPage> {
           child: Column(
             children: [
               const SizedBox(height: 4),
-              const GluCareBrandHeader(
-                logoWidth: 150,
-                textWidth: 190,
-                gap: 10,
-              ),
+              const GluCareBrandHeader(logoWidth: 150, textWidth: 190, gap: 10),
               const SizedBox(height: 56),
               AnimatedSwitcher(
                 duration: const Duration(milliseconds: 280),
@@ -145,12 +204,12 @@ class _RegisterPageState extends State<RegisterPage> {
                     child: child,
                   ),
                 ),
-                child: isOtpStep
+                child: isPasswordStep
                     ? Column(
-                        key: const ValueKey('otp-step'),
+                        key: const ValueKey('password-step'),
                         children: [
                           const Text(
-                            'Mã OTP đã được gửi tới',
+                            'Nhập mật khẩu cho số',
                             style: TextStyle(
                               color: AppColors.primaryBlue,
                               fontSize: 18,
@@ -170,31 +229,28 @@ class _RegisterPageState extends State<RegisterPage> {
                           ),
                           const SizedBox(height: 18),
                           TextField(
-                            controller: otpController,
-                            keyboardType: TextInputType.number,
+                            controller: passwordController,
+                            obscureText: true,
                             textAlign: TextAlign.center,
-                            maxLength: 4,
                             onChanged: (value) {
-                              final bool nextIsValidOtp =
-                                  value.trim().length == 4;
-                              if (nextIsValidOtp != isValidOtp) {
+                              final bool nextIsValidPassword =
+                                  value.trim().length >= _minPasswordLength;
+                              if (nextIsValidPassword != isValidPassword) {
                                 setState(() {
-                                  isValidOtp = nextIsValidOtp;
+                                  isValidPassword = nextIsValidPassword;
                                 });
                               }
                             },
                             style: const TextStyle(
                               color: AppColors.primaryBlue,
-                              fontSize: 28,
-                              letterSpacing: 6,
+                              fontSize: 26,
                             ),
                             decoration: const InputDecoration(
-                              counterText: '',
                               isDense: true,
-                              hintText: 'Nhập mã OTP',
+                              hintText: 'Nhập mật khẩu',
                               hintStyle: TextStyle(
                                 color: AppColors.primaryBlue,
-                                fontSize: 32,
+                                fontSize: 30,
                                 fontWeight: FontWeight.w500,
                               ),
                               enabledBorder: UnderlineInputBorder(
@@ -301,23 +357,9 @@ class _RegisterPageState extends State<RegisterPage> {
                 ],
               ),
               const SizedBox(height: 16),
-              if (isOtpStep) ...[
-                TextButton(
-                  onPressed: () {},
-                  child: const Text(
-                    'Không nhận được mã?',
-                    style: TextStyle(
-                      color: AppColors.checkboxBorder,
-                      fontSize: 16,
-                      decoration: TextDecoration.underline,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 8),
-              ],
               PrimaryPillButton(
-                label: 'Tiếp theo',
-                onPressed: (isOtpStep ? isValidOtp : isValidPhone)
+                label: isSubmitting ? 'Đang xử lý...' : 'Tiếp theo',
+                onPressed: (isPasswordStep ? isValidPassword : isValidPhone)
                     ? _onContinuePressed
                     : null,
                 disabledBackgroundColor: AppColors.disabledButton,

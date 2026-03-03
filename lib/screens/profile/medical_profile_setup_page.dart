@@ -1,3 +1,4 @@
+import 'package:first_app/core/services/backend_api_service.dart';
 import 'package:first_app/core/theme/app_colors.dart';
 import 'package:first_app/core/theme/app_text_styles.dart';
 import 'package:first_app/navigation/app_router.dart';
@@ -6,18 +7,54 @@ import 'package:first_app/core/widgets/primary_pill_button.dart';
 import 'package:flutter/material.dart';
 
 class MedicalProfileSetupPage extends StatefulWidget {
-  const MedicalProfileSetupPage({super.key});
+  const MedicalProfileSetupPage({super.key, this.args});
+
+  final MedicalProfileSetupRouteArgs? args;
 
   @override
-  State<MedicalProfileSetupPage> createState() => _MedicalProfileSetupPageState();
+  State<MedicalProfileSetupPage> createState() =>
+      _MedicalProfileSetupPageState();
 }
 
 class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
+  final BackendApiService _backendApiService = BackendApiService.instance;
+
   bool? isFemale;
+  bool isSubmitting = false;
+  bool showValidationErrors = false;
   DateTime? selectedBirthDate;
   final TextEditingController nameController = TextEditingController();
-  final TextEditingController emailController = TextEditingController();
   final TextEditingController birthDateController = TextEditingController();
+
+  String? get _nameError {
+    if (!showValidationErrors) {
+      return null;
+    }
+    if (nameController.text.trim().isEmpty) {
+      return 'Vui lòng nhập tên';
+    }
+    return null;
+  }
+
+  String? get _genderError {
+    if (!showValidationErrors) {
+      return null;
+    }
+    if (isFemale == null) {
+      return 'Vui lòng chọn giới tính';
+    }
+    return null;
+  }
+
+  String? get _birthDateError {
+    if (!showValidationErrors) {
+      return null;
+    }
+    if (selectedBirthDate == null) {
+      return 'Vui lòng chọn ngày sinh';
+    }
+    return null;
+  }
 
   Future<void> _pickBirthDate() async {
     final DateTime now = DateTime.now();
@@ -43,6 +80,9 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
     setState(() {
       selectedBirthDate = pickedDate;
       birthDateController.text = _formatDate(pickedDate);
+      if (showValidationErrors) {
+        showValidationErrors = false;
+      }
     });
   }
 
@@ -56,9 +96,83 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
   @override
   void dispose() {
     nameController.dispose();
-    emailController.dispose();
     birthDateController.dispose();
     super.dispose();
+  }
+
+  Future<void> _onSubmitProfile() async {
+    if (isSubmitting) {
+      return;
+    }
+
+    final String fullName = nameController.text.trim();
+    if (fullName.isEmpty || selectedBirthDate == null || isFemale == null) {
+      setState(() {
+        showValidationErrors = true;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Vui lòng điền đầy đủ thông tin hồ sơ')),
+      );
+      return;
+    }
+
+    final String? phoneNumber = widget.args?.phoneNumber;
+    final String? password = widget.args?.password;
+    if (phoneNumber == null || password == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Thiếu thông tin đăng ký, vui lòng thử lại'),
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      isSubmitting = true;
+    });
+
+    try {
+      final String gender = isFemale == true ? 'FEMALE' : 'MALE';
+      final String dateOfBirth =
+          '${selectedBirthDate!.year.toString().padLeft(4, '0')}-${selectedBirthDate!.month.toString().padLeft(2, '0')}-${selectedBirthDate!.day.toString().padLeft(2, '0')}';
+
+      final Map<String, dynamic> response = await _backendApiService
+          .registerPatient(
+            phoneNumber: phoneNumber,
+            password: password,
+            fullName: fullName,
+            gender: gender,
+            dateOfBirth: dateOfBirth,
+          );
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Đăng ký thành công')));
+
+      Navigator.of(context).pushNamed(
+        AppRoutes.profileGreeting,
+        arguments: ProfileGreetingRouteArgs(name: fullName),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error.toString().replaceFirst('Exception: ', '')),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          isSubmitting = false;
+        });
+      }
+    }
   }
 
   @override
@@ -82,10 +196,7 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
           child: Column(
             children: [
               const SizedBox(height: 48),
-              const Text(
-                'Tên của bạn',
-                style: AppTextStyles.sectionTitle,
-              ),
+              const Text('Tên của bạn', style: AppTextStyles.sectionTitle),
               const SizedBox(height: 14),
               Container(
                 width: double.infinity,
@@ -96,6 +207,13 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
                 ),
                 child: TextField(
                   controller: nameController,
+                  onChanged: (_) {
+                    if (showValidationErrors) {
+                      setState(() {
+                        showValidationErrors = false;
+                      });
+                    }
+                  },
                   textAlign: TextAlign.center,
                   style: const TextStyle(
                     color: AppColors.primaryBlue,
@@ -111,43 +229,35 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
                   ),
                 ),
               ),
-              const SizedBox(height: 14),
-              Container(
-                width: double.infinity,
-                height: 62,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(32),
-                  border: Border.all(color: AppColors.mediumGray),
-                ),
-                child: TextField(
-                  controller: emailController,
-                  keyboardType: TextInputType.emailAddress,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: AppColors.primaryBlue,
-                    fontSize: 34,
-                  ),
-                  decoration: const InputDecoration(
-                    border: InputBorder.none,
-                    hintText: 'Nhập email của bạn',
-                    hintStyle: TextStyle(
-                      color: AppColors.hintBlue,
-                      fontSize: 28,
+              if (_nameError != null) ...[
+                const SizedBox(height: 6),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    _nameError!,
+                    style: const TextStyle(
+                      color: Colors.red,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ),
-              ),
+              ],
               const SizedBox(height: 28),
-              const Text(
-                'Giới tính',
-                style: AppTextStyles.sectionTitle,
-              ),
+              const Text('Giới tính', style: AppTextStyles.sectionTitle),
               const SizedBox(height: 16),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   GestureDetector(
-                    onTap: () => setState(() => isFemale = false),
+                    onTap: () {
+                      setState(() {
+                        isFemale = false;
+                        if (showValidationErrors) {
+                          showValidationErrors = false;
+                        }
+                      });
+                    },
                     child: Row(
                       children: [
                         Container(
@@ -184,7 +294,14 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
                   ),
                   const SizedBox(width: 42),
                   GestureDetector(
-                    onTap: () => setState(() => isFemale = true),
+                    onTap: () {
+                      setState(() {
+                        isFemale = true;
+                        if (showValidationErrors) {
+                          showValidationErrors = false;
+                        }
+                      });
+                    },
                     child: Row(
                       children: [
                         Container(
@@ -221,11 +338,22 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
                   ),
                 ],
               ),
+              if (_genderError != null) ...[
+                const SizedBox(height: 6),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    _genderError!,
+                    style: const TextStyle(
+                      color: Colors.red,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
               const SizedBox(height: 28),
-              const Text(
-                'Ngày sinh',
-                style: AppTextStyles.sectionTitle,
-              ),
+              const Text('Ngày sinh', style: AppTextStyles.sectionTitle),
               const SizedBox(height: 14),
               Container(
                 width: double.infinity,
@@ -261,17 +389,24 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
                   ),
                 ),
               ),
+              if (_birthDateError != null) ...[
+                const SizedBox(height: 6),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    _birthDateError!,
+                    style: const TextStyle(
+                      color: Colors.red,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
               const SizedBox(height: 170),
               PrimaryPillButton(
-                label: 'Tiếp theo',
-                onPressed: () {
-                  final String displayName = nameController.text.trim();
-
-                  Navigator.of(context).pushNamed(
-                    AppRoutes.profileGreeting,
-                    arguments: ProfileGreetingRouteArgs(name: displayName),
-                  );
-                },
+                label: isSubmitting ? 'Đang xử lý...' : 'Tiếp theo',
+                onPressed: _onSubmitProfile,
               ),
             ],
           ),

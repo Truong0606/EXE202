@@ -310,9 +310,19 @@ class QuickEntryPage extends StatefulWidget {
 }
 
 class _QuickEntryPageState extends State<QuickEntryPage> {
+  final BackendApiService _backendApiService = BackendApiService.instance;
+
+  static const Map<String, String> _mealContextMap = <String, String>{
+    'Trước ăn': 'BEFORE_MEAL',
+    'Sau ăn': 'AFTER_MEAL',
+    'Lúc đói': 'FASTING',
+    'Trước khi ngủ': 'BEDTIME',
+  };
+
   int selectedQuickType = 0;
   TimeOfDay selectedTime = const TimeOfDay(hour: 6, minute: 0);
   String selectedNote = 'Trước ăn';
+  bool isSavingGlucose = false;
   late final TextEditingController glucoseController;
   late final TextEditingController doseController;
   late final TextEditingController medicineNameController;
@@ -348,6 +358,69 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
       setState(() {
         selectedTime = picked;
       });
+    }
+  }
+
+  DateTime _buildRecordedAtFromSelectedTime() {
+    final DateTime now = DateTime.now();
+    return DateTime(
+      now.year,
+      now.month,
+      now.day,
+      selectedTime.hour,
+      selectedTime.minute,
+    );
+  }
+
+  Future<void> _saveGlucoseReading() async {
+    if (isSavingGlucose) {
+      return;
+    }
+
+    final String glucoseText = glucoseController.text.trim();
+    final double? glucoseValue = double.tryParse(glucoseText);
+    if (glucoseValue == null || glucoseValue <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Vui lòng nhập chỉ số đường huyết hợp lệ')),
+      );
+      return;
+    }
+
+    final String mealContext = _mealContextMap[selectedNote] ?? 'BEFORE_MEAL';
+    final DateTime recordedAt = _buildRecordedAtFromSelectedTime();
+
+    setState(() {
+      isSavingGlucose = true;
+    });
+
+    try {
+      await _backendApiService.createGlucoseReading(
+        glucoseValue: glucoseValue,
+        mealContext: mealContext,
+        recordedAt: recordedAt,
+      );
+
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Đã lưu chỉ số đường huyết')));
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error.toString().replaceFirst('Exception: ', '')),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          isSavingGlucose = false;
+        });
+      }
     }
   }
 
@@ -618,20 +691,70 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
                                       fontWeight: FontWeight.w500,
                                     ),
                                   )
-                                : Center(
+                                : Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                    ),
                                     child: DropdownButtonHideUnderline(
                                       child: DropdownButton<String>(
                                         value: selectedNote,
+                                        isExpanded: true,
+                                        isDense: true,
+                                        alignment: Alignment.centerLeft,
                                         borderRadius: BorderRadius.circular(10),
                                         style: const TextStyle(
                                           color: Color(0xFF17324F),
-                                          fontSize: 14,
+                                          fontSize: 13,
                                           fontWeight: FontWeight.w500,
                                         ),
                                         icon: const Icon(
                                           Icons.arrow_drop_down,
                                           color: Color(0xFF17324F),
                                         ),
+                                        selectedItemBuilder:
+                                            (BuildContext context) =>
+                                                const <Widget>[
+                                                  Align(
+                                                    alignment:
+                                                        Alignment.centerLeft,
+                                                    child: Text(
+                                                      'Trước ăn',
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                      maxLines: 1,
+                                                    ),
+                                                  ),
+                                                  Align(
+                                                    alignment:
+                                                        Alignment.centerLeft,
+                                                    child: Text(
+                                                      'Sau ăn',
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                      maxLines: 1,
+                                                    ),
+                                                  ),
+                                                  Align(
+                                                    alignment:
+                                                        Alignment.centerLeft,
+                                                    child: Text(
+                                                      'Lúc đói',
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                      maxLines: 1,
+                                                    ),
+                                                  ),
+                                                  Align(
+                                                    alignment:
+                                                        Alignment.centerLeft,
+                                                    child: Text(
+                                                      'Trước khi ngủ',
+                                                      overflow:
+                                                          TextOverflow.ellipsis,
+                                                      maxLines: 1,
+                                                    ),
+                                                  ),
+                                                ],
                                         onChanged: (String? value) {
                                           if (value != null) {
                                             setState(() {
@@ -642,11 +765,35 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
                                         items: const [
                                           DropdownMenuItem<String>(
                                             value: 'Trước ăn',
-                                            child: Text('Trước ăn'),
+                                            child: Text(
+                                              'Trước ăn',
+                                              overflow: TextOverflow.ellipsis,
+                                              maxLines: 1,
+                                            ),
                                           ),
                                           DropdownMenuItem<String>(
                                             value: 'Sau ăn',
-                                            child: Text('Sau ăn'),
+                                            child: Text(
+                                              'Sau ăn',
+                                              overflow: TextOverflow.ellipsis,
+                                              maxLines: 1,
+                                            ),
+                                          ),
+                                          DropdownMenuItem<String>(
+                                            value: 'Lúc đói',
+                                            child: Text(
+                                              'Lúc đói',
+                                              overflow: TextOverflow.ellipsis,
+                                              maxLines: 1,
+                                            ),
+                                          ),
+                                          DropdownMenuItem<String>(
+                                            value: 'Trước khi ngủ',
+                                            child: Text(
+                                              'Trước khi ngủ',
+                                              overflow: TextOverflow.ellipsis,
+                                              maxLines: 1,
+                                            ),
                                           ),
                                         ],
                                       ),
@@ -658,17 +805,27 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
                     ),
                     const SizedBox(height: 12),
                     Row(
-                      children: const [
+                      children: [
                         Expanded(
                           child: _QuickActionChip(
                             label: 'Quét AI',
                             isSelected: true,
                           ),
                         ),
-                        SizedBox(width: 12),
-                        Expanded(child: _QuickActionChip(label: 'Lưu')),
-                        SizedBox(width: 12),
-                        Expanded(child: _QuickActionChip(label: 'Cân bằng')),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: GestureDetector(
+                            onTap: selectedQuickType == 0 && !isSavingGlucose
+                                ? _saveGlucoseReading
+                                : null,
+                            child: _QuickActionChip(
+                              label: isSavingGlucose ? 'Đang lưu...' : 'Lưu',
+                              isSelected: isSavingGlucose,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        const Expanded(child: _QuickActionChip(label: 'Cân bằng')),
                       ],
                     ),
                   ],
@@ -1114,7 +1271,9 @@ class _AiMessage {
 }
 
 class _DiaryTab extends StatefulWidget {
-  const _DiaryTab();
+  const _DiaryTab({required this.followMembers});
+
+  final List<FollowMemberData> followMembers;
 
   @override
   State<_DiaryTab> createState() => _DiaryTabState();
@@ -1175,10 +1334,7 @@ class _DiaryTabState extends State<_DiaryTab> {
           width: double.infinity,
           padding: const EdgeInsets.fromLTRB(10, 10, 10, 8),
           decoration: BoxDecoration(
-            border: Border.all(
-              color: const Color(0xFF2B8BD7),
-              width: 3,
-            ),
+            border: Border.all(color: const Color(0xFF2B8BD7), width: 3),
           ),
           child: Column(
             children: [
@@ -1220,9 +1376,7 @@ class _DiaryTabState extends State<_DiaryTab> {
                     ),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: _Glucose24hGraph(
-                        dataPoints: _glucose24hPoints,
-                      ),
+                      child: _Glucose24hGraph(dataPoints: _glucose24hPoints),
                     ),
                   ],
                 ),
@@ -1265,17 +1419,11 @@ class _DiaryTabState extends State<_DiaryTab> {
         const Row(
           children: [
             Expanded(
-              child: _DiaryMetricTile(
-                title: 'Trung bình',
-                value: '136',
-              ),
+              child: _DiaryMetricTile(title: 'Trung bình', value: '136'),
             ),
             SizedBox(width: 10),
             Expanded(
-              child: _DiaryMetricTile(
-                title: 'Dao động',
-                value: '30',
-              ),
+              child: _DiaryMetricTile(title: 'Dao động', value: '30'),
             ),
           ],
         ),
@@ -1283,17 +1431,11 @@ class _DiaryTabState extends State<_DiaryTab> {
         const Row(
           children: [
             Expanded(
-              child: _DiaryMetricTile(
-                title: 'TIR',
-                value: '80%',
-              ),
+              child: _DiaryMetricTile(title: 'TIR', value: '80%'),
             ),
             SizedBox(width: 10),
             Expanded(
-              child: _DiaryMetricTile(
-                title: 'HbA1c',
-                value: '1.2%',
-              ),
+              child: _DiaryMetricTile(title: 'HbA1c', value: '1.2%'),
             ),
           ],
         ),
@@ -1309,10 +1451,7 @@ class _DiaryTabState extends State<_DiaryTab> {
               );
             },
             child: const Padding(
-              padding: EdgeInsets.symmetric(
-                horizontal: 2,
-                vertical: 2,
-              ),
+              padding: EdgeInsets.symmetric(horizontal: 2, vertical: 2),
               child: Text(
                 'Xem thống kê chi tiết →',
                 style: TextStyle(
@@ -1327,10 +1466,7 @@ class _DiaryTabState extends State<_DiaryTab> {
         const SizedBox(height: 8),
         Container(
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(
-            horizontal: 12,
-            vertical: 10,
-          ),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
             color: const Color(0xFFCBEAF8),
             borderRadius: BorderRadius.circular(12),
@@ -1369,6 +1505,29 @@ class _DiaryTabState extends State<_DiaryTab> {
   }
 
   Widget _buildFollowPanel() {
+    final List<FollowMemberData> members = widget.followMembers.isNotEmpty
+        ? widget.followMembers
+        : const <FollowMemberData>[
+            FollowMemberData(
+              name: 'Nguyễn Văn A',
+              glucoseText: '165 mmol/L',
+              level: 'Nguy hiểm',
+              isDanger: true,
+            ),
+            FollowMemberData(
+              name: 'Nguyễn Văn A',
+              glucoseText: '165 mmol/L',
+              level: 'Bình thường',
+              isDanger: false,
+            ),
+            FollowMemberData(
+              name: 'Nguyễn Văn A',
+              glucoseText: '165 mmol/L',
+              level: 'Bình thường',
+              isDanger: false,
+            ),
+          ];
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1473,17 +1632,16 @@ class _DiaryTabState extends State<_DiaryTab> {
         ),
         const SizedBox(height: 10),
         if (selectedFollowMode == 0) ...[
-          const _FollowPersonTile(level: 'Nguy hiểm', isDanger: true),
-          const SizedBox(height: 10),
-          const _FollowPersonTile(level: 'Bình thường'),
-          const SizedBox(height: 10),
-          const _FollowPersonTile(level: 'Bình thường'),
-          const SizedBox(height: 10),
-          const _FollowPersonTile(level: 'Bình thường'),
-          const SizedBox(height: 10),
-          const _FollowPersonTile(level: 'Bình thường'),
-          const SizedBox(height: 10),
-          const _FollowPersonTile(level: 'Bình thường'),
+          ...members.asMap().entries.map((entry) {
+            final int index = entry.key;
+            final FollowMemberData member = entry.value;
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: index == members.length - 1 ? 0 : 10,
+              ),
+              child: _FollowPersonTile(member: member),
+            );
+          }),
         ] else ...[
           Container(
             width: double.infinity,
@@ -1664,25 +1822,23 @@ class _DiaryMetricTile extends StatelessWidget {
 }
 
 class _FollowPersonTile extends StatelessWidget {
-  const _FollowPersonTile({
-    required this.level,
-    this.isDanger = false,
-  });
+  const _FollowPersonTile({required this.member});
 
-  final String level;
-  final bool isDanger;
+  final FollowMemberData member;
 
   @override
   Widget build(BuildContext context) {
+    final String avatarLetter = member.name.trim().isEmpty
+        ? 'A'
+        : member.name.trim().characters.first.toUpperCase();
+
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
       decoration: BoxDecoration(
         color: const Color(0xFFE8ECEF),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: const Color(0xFFD0D7DE),
-        ),
+        border: Border.all(color: const Color(0xFFD0D7DE)),
       ),
       child: Row(
         children: [
@@ -1694,8 +1850,8 @@ class _FollowPersonTile extends StatelessWidget {
               shape: BoxShape.circle,
             ),
             alignment: Alignment.center,
-            child: const Text(
-              'A',
+            child: Text(
+              avatarLetter,
               style: TextStyle(
                 color: Colors.white,
                 fontSize: 14,
@@ -1704,22 +1860,22 @@ class _FollowPersonTile extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 12),
-          const Expanded(
+          Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Nguyễn Văn A',
-                  style: TextStyle(
+                  member.name,
+                  style: const TextStyle(
                     color: Color(0xFF202F44),
                     fontSize: 18,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
-                SizedBox(height: 2),
+                const SizedBox(height: 2),
                 Text(
-                  '165 mmol/L',
-                  style: TextStyle(
+                  member.glucoseText,
+                  style: const TextStyle(
                     color: Color(0xFF263446),
                     fontSize: 14,
                     fontWeight: FontWeight.w500,
@@ -1731,11 +1887,13 @@ class _FollowPersonTile extends StatelessWidget {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             decoration: BoxDecoration(
-              color: isDanger ? const Color(0xFFFF1F1F) : const Color(0xFF72E26D),
+              color: member.isDanger
+                  ? const Color(0xFFFF1F1F)
+                  : const Color(0xFF72E26D),
               borderRadius: BorderRadius.circular(6),
             ),
             child: Text(
-              level,
+              member.level,
               style: const TextStyle(
                 color: Colors.white,
                 fontSize: 11,
@@ -1747,22 +1905,6 @@ class _FollowPersonTile extends StatelessWidget {
       ),
     );
   }
-}
-
-class BlogArticleData {
-  const BlogArticleData({
-    required this.title,
-    required this.publishedInfo,
-    required this.summary,
-    required this.body,
-    this.imageUrl,
-  });
-
-  final String title;
-  final String publishedInfo;
-  final String summary;
-  final List<String> body;
-  final String? imageUrl;
 }
 
 class _BlogTab extends StatelessWidget {
@@ -1841,7 +1983,7 @@ class _BlogArticleCard extends StatelessWidget {
         child: Container(
           height: height,
           decoration: BoxDecoration(
-            color: skeletonColor.withOpacity(0.35),
+            color: skeletonColor.withValues(alpha: 0.35),
             borderRadius: BorderRadius.circular(6),
           ),
         ),
