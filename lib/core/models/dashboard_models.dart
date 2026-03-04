@@ -95,3 +95,79 @@ class UserProfileData {
     );
   }
 }
+
+class GlucoseHistoryItemData {
+  const GlucoseHistoryItemData({
+    required this.id,
+    required this.glucoseValue,
+    required this.readingType,
+    required this.mealContext,
+    required this.recordedAt,
+    this.createdAt,
+  });
+
+  final String id;
+  final double glucoseValue;
+  final String readingType;
+  final String mealContext;
+  final DateTime recordedAt;
+  final DateTime? createdAt;
+
+  factory GlucoseHistoryItemData.fromJson(Map<String, dynamic> json) {
+    final String glucoseText = (json['glucoseValue'] ?? '0').toString();
+    final double glucoseValue = double.tryParse(glucoseText) ?? 0;
+    final DateTime recordedAt =
+        DateTime.tryParse((json['recordedAt'] ?? '').toString()) ??
+        DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+    final DateTime? createdAt = DateTime.tryParse(
+      (json['createdAt'] ?? '').toString(),
+    );
+
+    return GlucoseHistoryItemData(
+      id: (json['id'] ?? '').toString(),
+      glucoseValue: glucoseValue,
+      readingType: (json['readingType'] ?? '').toString(),
+      mealContext: (json['mealContext'] ?? '').toString(),
+      recordedAt: recordedAt,
+      createdAt: createdAt,
+    );
+  }
+}
+
+class GlucoseAnalyticsData {
+  const GlucoseAnalyticsData({
+    required this.tir,
+    required this.hba1c,
+    required this.chartValues,
+  });
+
+  final double? tir;
+  final double? hba1c;
+  final List<double> chartValues;
+
+  factory GlucoseAnalyticsData.fromJson(Map<String, dynamic> json) {
+    final dynamic stats = json['stats'];
+    final dynamic chartData = json['chartData'];
+
+    double? parseNum(dynamic value) {
+      if (value is num) {
+        return value.toDouble();
+      }
+      return double.tryParse(value?.toString() ?? '');
+    }
+
+    final List<double> values = chartData is List
+        ? chartData
+              .whereType<Map<String, dynamic>>()
+              .map((Map<String, dynamic> item) => parseNum(item['value']))
+              .whereType<double>()
+              .toList()
+        : const <double>[];
+
+    return GlucoseAnalyticsData(
+      tir: stats is Map<String, dynamic> ? parseNum(stats['tir']) : null,
+      hba1c: parseNum(json['hba1c']),
+      chartValues: values,
+    );
+  }
+}

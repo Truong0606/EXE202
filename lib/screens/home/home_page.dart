@@ -162,18 +162,20 @@ class _DashboardTab extends StatefulWidget {
 class _DashboardTabState extends State<_DashboardTab> {
   static const int _glucoseGoalPercent = 50;
   static const int _weeklyGoalPercent = 40;
+  final BackendApiService _backendApiService = BackendApiService.instance;
 
   DateTime displayedMonth = DateTime(DateTime.now().year, DateTime.now().month);
   DateTime selectedDate = DateTime.now();
   final List<double> _glucose24hPoints = <double>[];
-  final math.Random _random = math.Random();
-  Timer? _liveDataTimer;
-  double _lastMockValue = 136;
+  GlucoseHistoryItemData? _latestGlucoseHistory;
+  double? _weeklyComplianceScore;
 
   @override
   void initState() {
     super.initState();
-    _startRealtimeGlucoseUpdates();
+    unawaited(_loadLatestGlucoseHistory());
+    unawaited(_loadGlucoseGraph24hData());
+    unawaited(_loadWeeklyComplianceScore());
     unawaited(
       NotificationService.instance.notifyWeeklyGoalReachedIfNeeded(
         glucoseGoalPercent: _glucoseGoalPercent,
@@ -184,35 +186,154 @@ class _DashboardTabState extends State<_DashboardTab> {
 
   @override
   void dispose() {
-    _liveDataTimer?.cancel();
     super.dispose();
   }
 
-  void _startRealtimeGlucoseUpdates() {
-    _liveDataTimer?.cancel();
-    _liveDataTimer = Timer.periodic(const Duration(seconds: 3), (_) {
-      _addRealtimeGlucosePoint();
-    });
-  }
-
-  void _addRealtimeGlucosePoint() {
-    final double previous = _glucose24hPoints.isNotEmpty
-        ? _glucose24hPoints.last
-        : _lastMockValue;
-    final double delta = (_random.nextDouble() * 14) - 7;
-    final double nextValue = (previous + delta).clamp(72, 220);
-
+  Future<void> _loadLatestGlucoseHistory() async {
+    final GlucoseHistoryItemData? latest = await _backendApiService
+        .fetchLatestGlucoseHistory();
     if (!mounted) {
       return;
     }
 
     setState(() {
-      _glucose24hPoints.add(nextValue);
-      if (_glucose24hPoints.length > 24) {
-        _glucose24hPoints.removeAt(0);
-      }
-      _lastMockValue = nextValue;
+      _latestGlucoseHistory = latest;
     });
+  }
+
+  Future<void> _loadGlucoseGraph24hData() async {
+    final List<GlucoseHistoryItemData> records = await _backendApiService
+        .fetchGlucoseHistoryLast24Hours();
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _glucose24hPoints
+        ..clear()
+        ..addAll(records.map((GlucoseHistoryItemData item) => item.glucoseValue));
+    });
+  }
+
+  Future<void> _refreshGlucoseData() async {
+    await Future.wait<void>(<Future<void>>[
+      _loadLatestGlucoseHistory(),
+      _loadGlucoseGraph24hData(),
+      _loadWeeklyComplianceScore(),
+    ]);
+  }
+
+  Future<void> _loadWeeklyComplianceScore() async {
+    final double? score = await _backendApiService.fetchWeeklyComplianceScore();
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _weeklyComplianceScore = score;
+    });
+  }
+
+  String _formatScore(double? value) {
+    if (value == null) {
+      return '--';
+    }
+    if (value == value.roundToDouble()) {
+      return value.toStringAsFixed(0);
+    }
+    return value.toStringAsFixed(1);
+  }
+
+  String _mealContextLabel(String mealContext) {
+    switch (mealContext) {
+      case 'BEFORE_MEAL':
+        return 'Trước khi ăn';
+      case 'AFTER_MEAL':
+        return 'Sau khi ăn';
+      case 'FASTING':
+        return 'Lúc đói';
+      case 'BEDTIME':
+        return 'Trước khi ngủ';
+      default:
+        return 'Chưa xác định';
+    }
+  }
+
+  String _formatRecordedAtLabel(DateTime recordedAt) {
+    final DateTime localTime = recordedAt.toLocal();
+    final int hour24 = localTime.hour;
+    final int hour12 = hour24 % 12 == 0 ? 12 : hour24 % 12;
+    final String minute = localTime.minute.toString().padLeft(2, '0');
+    final String meridiem = hour24 >= 12 ? 'PM' : 'AM';
+    final String hour = hour12.toString().padLeft(2, '0');
+    return '$hour:$minute $meridiem';
+  }
+
+  String _formatDayLabel(DateTime date) {
+    final String day = date.day.toString().padLeft(2, '0');
+    final String month = date.month.toString().padLeft(2, '0');
+    final String year = date.year.toString();
+    return '$day/$month/$year';
+  }
+
+  String _formatTimeOnly(DateTime date) {
+    final DateTime local = date.toLocal();
+    final String hour = local.hour.toString().padLeft(2, '0');
+    final String minute = local.minute.toString().padLeft(2, '0');
+    return '$hour:$minute';
+  }
+
+  String _formatGlucoseValue(double value) {
+    if (value == value.roundToDouble()) {
+      return value.toStringAsFixed(0);
+    }
+    return value.toStringAsFixed(1);
+  }
+
+  Future<void> _showDayHistoryPopup(DateTime day) async {
+    final List<GlucoseHistoryItemData> records = await _backendApiService
+        .fetchGlucoseHistoryByDate(day);
+    if (!mounted) {
+      return;
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text('Lịch sử ngày ${_formatDayLabel(day)}'),
+          content: SizedBox(
+            width: 320,
+            child: records.isEmpty
+                ? const Text('Không có dữ liệu trong ngày này')
+                : SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: records.map((GlucoseHistoryItemData record) {
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: Text(
+                            '${_formatTimeOnly(record.recordedAt)}  •  ${_mealContextLabel(record.mealContext)}  •  ${_formatGlucoseValue(record.glucoseValue)} mg/dL',
+                            style: const TextStyle(
+                              color: Color(0xFF17324F),
+                              fontSize: 13,
+                              height: 1.35,
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Đóng'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   List<int?> _buildCalendarCells(DateTime month) {
@@ -285,7 +406,16 @@ class _DashboardTabState extends State<_DashboardTab> {
       displayedMonth.year,
       displayedMonth.month,
     ).isAtSameMomentAs(latestAllowedMonth);
-    final int latestGlucose = _lastMockValue.round();
+    final String latestGlucose = _latestGlucoseHistory == null
+      ? '--'
+      : _latestGlucoseHistory!.glucoseValue.round().toString();
+    final String latestMealContext = _latestGlucoseHistory == null
+        ? 'Chưa có dữ liệu'
+        : _mealContextLabel(_latestGlucoseHistory!.mealContext);
+    final String latestRecordedAtLabel = _latestGlucoseHistory == null
+      ? '--:--'
+      : _formatRecordedAtLabel(_latestGlucoseHistory!.recordedAt);
+    final String weeklyScoreText = _formatScore(_weeklyComplianceScore);
     final List<int?> calendarCells = _buildCalendarCells(displayedMonth);
     const List<String> weekdays = [
       'Th.2',
@@ -490,7 +620,7 @@ class _DashboardTabState extends State<_DashboardTab> {
                                   crossAxisAlignment: CrossAxisAlignment.end,
                                   children: [
                                     Text(
-                                      '$latestGlucose',
+                                      latestGlucose,
                                       style: TextStyle(
                                         color: Color(0xFF17324F),
                                         fontSize: 34,
@@ -514,8 +644,8 @@ class _DashboardTabState extends State<_DashboardTab> {
                                 ),
                               ),
                               const SizedBox(height: 4),
-                              const Text(
-                                'Trước khi ăn\nVào lúc 06:50 AM',
+                              Text(
+                                '$latestMealContext\nVào lúc $latestRecordedAtLabel',
                                 style: TextStyle(
                                   color: Color(0xFF4F6780),
                                   fontSize: 12,
@@ -603,7 +733,7 @@ class _DashboardTabState extends State<_DashboardTab> {
                                 TextSpan(
                                   children: [
                                     TextSpan(
-                                      text: '$_glucoseGoalPercent',
+                                      text: weeklyScoreText,
                                       style: const TextStyle(
                                         color: Color(0xFF17324F),
                                         fontSize: 44,
@@ -625,7 +755,7 @@ class _DashboardTabState extends State<_DashboardTab> {
                               ),
                               const SizedBox(height: 2),
                               Text(
-                                'Mục tiêu tuần này:  $_weeklyGoalPercent%',
+                                'Mục tiêu tuần này:  40%',
                                 style: const TextStyle(
                                   color: Color(0xFF4F6780),
                                   fontSize: 12,
@@ -678,7 +808,9 @@ class _DashboardTabState extends State<_DashboardTab> {
                     onTap: () {
                       Navigator.of(context).push(
                         MaterialPageRoute<void>(
-                          builder: (_) => const QuickEntryPage(),
+                          builder: (_) => QuickEntryPage(
+                            onGlucoseSaved: _refreshGlucoseData,
+                          ),
                         ),
                       );
                     },
@@ -713,9 +845,9 @@ class _DashboardTabState extends State<_DashboardTab> {
                   ),
                 ),
                 const SizedBox(height: 14),
-                const Text(
-                  'Theo dõi mục tiêu tháng 11',
-                  style: TextStyle(
+                Text(
+                  'Theo dõi mục tiêu tháng ${displayedMonth.month}',
+                  style: const TextStyle(
                     color: Color(0xFF12355A),
                     fontSize: 24,
                     fontWeight: FontWeight.w700,
@@ -808,14 +940,16 @@ class _DashboardTabState extends State<_DashboardTab> {
 
                           return InkWell(
                             borderRadius: BorderRadius.circular(10),
-                            onTap: () {
+                            onTap: () async {
+                              final DateTime pickedDate = DateTime(
+                                displayedMonth.year,
+                                displayedMonth.month,
+                                day,
+                              );
                               setState(() {
-                                selectedDate = DateTime(
-                                  displayedMonth.year,
-                                  displayedMonth.month,
-                                  day,
-                                );
+                                selectedDate = pickedDate;
                               });
+                              await _showDayHistoryPopup(pickedDate);
                             },
                             child: Container(
                               decoration: BoxDecoration(
@@ -1283,9 +1417,6 @@ class _AccountTabState extends State<_AccountTab> {
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Không thể đăng xuất, vui lòng thử lại')),
-      );
       setState(() {
         _isLoggingOut = false;
       });

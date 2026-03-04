@@ -303,7 +303,9 @@ class Glucose24hDetailPage extends StatelessWidget {
 }
 
 class QuickEntryPage extends StatefulWidget {
-  const QuickEntryPage({super.key});
+  const QuickEntryPage({super.key, this.onGlucoseSaved});
+
+  final Future<void> Function()? onGlucoseSaved;
 
   @override
   State<QuickEntryPage> createState() => _QuickEntryPageState();
@@ -319,11 +321,23 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
     'Trước khi ngủ': 'BEDTIME',
   };
 
+  static const Map<String, String> _mealTypeMap = <String, String>{
+    'Bữa sáng': 'BREAKFAST',
+    'Bữa trưa': 'LUNCH',
+    'Bữa tối': 'DINNER',
+    'Bữa phụ': 'SNACK',
+  };
+
   int selectedQuickType = 0;
   TimeOfDay selectedTime = const TimeOfDay(hour: 6, minute: 0);
   String selectedNote = 'Trước ăn';
+  String selectedMealType = 'Bữa sáng';
+  String selectedMedicationUnit = 'mg';
   bool isSavingGlucose = false;
   late final TextEditingController glucoseController;
+  late final TextEditingController caloriesController;
+  late final TextEditingController carbsController;
+  late final TextEditingController foodNameController;
   late final TextEditingController doseController;
   late final TextEditingController medicineNameController;
 
@@ -331,6 +345,9 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
   void initState() {
     super.initState();
     glucoseController = TextEditingController(text: '136');
+    caloriesController = TextEditingController(text: '500');
+    carbsController = TextEditingController(text: '50');
+    foodNameController = TextEditingController(text: 'Phở bò');
     doseController = TextEditingController(text: '5');
     medicineNameController = TextEditingController(text: 'Astrapid');
   }
@@ -338,6 +355,9 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
   @override
   void dispose() {
     glucoseController.dispose();
+    caloriesController.dispose();
+    carbsController.dispose();
+    foodNameController.dispose();
     doseController.dispose();
     medicineNameController.dispose();
     super.dispose();
@@ -372,6 +392,48 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
     );
   }
 
+  Future<void> _showSavedSuccessPopup() async {
+    if (!mounted) {
+      return;
+    }
+
+    showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      barrierLabel: 'save-success',
+      barrierColor: Colors.transparent,
+      transitionDuration: const Duration(milliseconds: 120),
+      pageBuilder: (BuildContext dialogContext, _, __) {
+        Future<void>.delayed(const Duration(seconds: 1), () {
+          if (Navigator.of(dialogContext).canPop()) {
+            Navigator.of(dialogContext).pop();
+          }
+        });
+
+        return Center(
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+              decoration: BoxDecoration(
+                color: const Color(0xEE17324F),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Text(
+                'Đã lưu thành công',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _saveGlucoseReading() async {
     if (isSavingGlucose) {
       return;
@@ -380,9 +442,6 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
     final String glucoseText = glucoseController.text.trim();
     final double? glucoseValue = double.tryParse(glucoseText);
     if (glucoseValue == null || glucoseValue <= 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Vui lòng nhập chỉ số đường huyết hợp lệ')),
-      );
       return;
     }
 
@@ -403,18 +462,102 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Đã lưu chỉ số đường huyết')));
-    } catch (error) {
+
+      if (widget.onGlucoseSaved != null) {
+        await widget.onGlucoseSaved!.call();
+      }
+      await _showSavedSuccessPopup();
+    } catch (_) {
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(error.toString().replaceFirst('Exception: ', '')),
-        ),
+    } finally {
+      if (mounted) {
+        setState(() {
+          isSavingGlucose = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _saveMealEntry() async {
+    if (isSavingGlucose) {
+      return;
+    }
+
+    final String foodName = foodNameController.text.trim();
+    final double? calories = double.tryParse(caloriesController.text.trim());
+    final double? carbs = double.tryParse(carbsController.text.trim());
+    if (foodName.isEmpty || calories == null || carbs == null) {
+      return;
+    }
+
+    final String mealType = _mealTypeMap[selectedMealType] ?? 'BREAKFAST';
+    final DateTime recordedAt = _buildRecordedAtFromSelectedTime();
+
+    setState(() {
+      isSavingGlucose = true;
+    });
+
+    try {
+      await _backendApiService.createMealEntry(
+        foodName: foodName,
+        mealType: mealType,
+        calories: calories,
+        carbs: carbs,
+        recordedAt: recordedAt,
       );
+
+      if (!mounted) {
+        return;
+      }
+      await _showSavedSuccessPopup();
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          isSavingGlucose = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _saveMedicationEntry() async {
+    if (isSavingGlucose) {
+      return;
+    }
+
+    final String medicineName = medicineNameController.text.trim();
+    final double? dosage = double.tryParse(doseController.text.trim());
+    if (medicineName.isEmpty || dosage == null || dosage <= 0) {
+      return;
+    }
+
+    final DateTime recordedAt = _buildRecordedAtFromSelectedTime();
+
+    setState(() {
+      isSavingGlucose = true;
+    });
+
+    try {
+      await _backendApiService.createMedicationEntry(
+        medicineName: medicineName,
+        dosage: dosage,
+        unit: selectedMedicationUnit,
+        recordedAt: recordedAt,
+      );
+
+      if (!mounted) {
+        return;
+      }
+      await _showSavedSuccessPopup();
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
     } finally {
       if (mounted) {
         setState(() {
@@ -426,6 +569,7 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
 
   @override
   Widget build(BuildContext context) {
+    final bool isMealMode = selectedQuickType == 1;
     final bool isMedicineMode = selectedQuickType == 2;
 
     return Scaffold(
@@ -529,6 +673,8 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
                     Text(
                       isMedicineMode
                           ? 'Nhập nhanh thuốc'
+                          : isMealMode
+                          ? 'Nhập nhanh bữa ăn'
                           : 'Nhập nhanh đường huyết',
                       style: const TextStyle(
                         color: Color(0xFF17324F),
@@ -552,7 +698,11 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
                         ),
                         Expanded(
                           child: Text(
-                            isMedicineMode ? 'Liều lượng' : 'ĐH',
+                            isMedicineMode
+                                ? 'Liều lượng'
+                                : isMealMode
+                                ? 'Calo'
+                                : 'ĐH',
                             textAlign: TextAlign.center,
                             style: const TextStyle(
                               color: Color(0xFF17324F),
@@ -563,7 +713,11 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
                         ),
                         Expanded(
                           child: Text(
-                            isMedicineMode ? 'Tên thuốc' : 'Ghi chú',
+                            isMedicineMode
+                                ? 'Tên thuốc'
+                                : isMealMode
+                                ? 'Carbs'
+                                : 'Ghi chú',
                             textAlign: TextAlign.center,
                             style: const TextStyle(
                               color: Color(0xFF17324F),
@@ -637,18 +791,50 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
                                           ),
                                         ),
                                       ),
-                                      const Text(
-                                        ' mg',
-                                        style: TextStyle(
-                                          color: Color(0xFF17324F),
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.w500,
+                                      const SizedBox(width: 4),
+                                      DropdownButtonHideUnderline(
+                                        child: DropdownButton<String>(
+                                          value: selectedMedicationUnit,
+                                          isDense: true,
+                                          style: const TextStyle(
+                                            color: Color(0xFF17324F),
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                          icon: const Icon(
+                                            Icons.arrow_drop_down,
+                                            color: Color(0xFF17324F),
+                                            size: 20,
+                                          ),
+                                          onChanged: (String? value) {
+                                            if (value != null) {
+                                              setState(() {
+                                                selectedMedicationUnit = value;
+                                              });
+                                            }
+                                          },
+                                          items: const [
+                                            DropdownMenuItem<String>(
+                                              value: 'mg',
+                                              child: Text('mg'),
+                                            ),
+                                            DropdownMenuItem<String>(
+                                              value: 'ml',
+                                              child: Text('ml'),
+                                            ),
+                                            DropdownMenuItem<String>(
+                                              value: 'viên',
+                                              child: Text('viên'),
+                                            ),
+                                          ],
                                         ),
                                       ),
                                     ],
                                   )
                                 : TextField(
-                                    controller: glucoseController,
+                                  controller: isMealMode
+                                    ? caloriesController
+                                    : glucoseController,
                                     textAlign: TextAlign.center,
                                     keyboardType: TextInputType.number,
                                     inputFormatters: [
@@ -692,117 +878,224 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
                                     ),
                                   )
                                 : Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                    ),
-                                    child: DropdownButtonHideUnderline(
-                                      child: DropdownButton<String>(
-                                        value: selectedNote,
-                                        isExpanded: true,
-                                        isDense: true,
-                                        alignment: Alignment.centerLeft,
-                                        borderRadius: BorderRadius.circular(10),
-                                        style: const TextStyle(
-                                          color: Color(0xFF17324F),
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                        icon: const Icon(
-                                          Icons.arrow_drop_down,
-                                          color: Color(0xFF17324F),
-                                        ),
-                                        selectedItemBuilder:
-                                            (BuildContext context) =>
-                                                const <Widget>[
-                                                  Align(
-                                                    alignment:
-                                                        Alignment.centerLeft,
-                                                    child: Text(
-                                                      'Trước ăn',
-                                                      overflow:
-                                                          TextOverflow.ellipsis,
-                                                      maxLines: 1,
-                                                    ),
+                                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                                    child: isMealMode
+                                        ? TextField(
+                                            controller: carbsController,
+                                            textAlign: TextAlign.center,
+                                            keyboardType: TextInputType.number,
+                                            inputFormatters: [
+                                              FilteringTextInputFormatter.digitsOnly,
+                                            ],
+                                            decoration: const InputDecoration(
+                                              border: InputBorder.none,
+                                              isDense: true,
+                                              contentPadding: EdgeInsets.zero,
+                                            ),
+                                            style: const TextStyle(
+                                              color: Color(0xFF17324F),
+                                              fontSize: 24,
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          )
+                                        : DropdownButtonHideUnderline(
+                                            child: DropdownButton<String>(
+                                              value: selectedNote,
+                                              isExpanded: true,
+                                              isDense: true,
+                                              alignment: Alignment.centerLeft,
+                                              borderRadius: BorderRadius.circular(10),
+                                              style: const TextStyle(
+                                                color: Color(0xFF17324F),
+                                                fontSize: 13,
+                                                fontWeight: FontWeight.w500,
+                                              ),
+                                              icon: const Icon(
+                                                Icons.arrow_drop_down,
+                                                color: Color(0xFF17324F),
+                                              ),
+                                              selectedItemBuilder:
+                                                  (BuildContext context) =>
+                                                      const <Widget>[
+                                                        Align(
+                                                          alignment:
+                                                              Alignment.centerLeft,
+                                                          child: Text(
+                                                            'Trước ăn',
+                                                            overflow:
+                                                                TextOverflow.ellipsis,
+                                                            maxLines: 1,
+                                                          ),
+                                                        ),
+                                                        Align(
+                                                          alignment:
+                                                              Alignment.centerLeft,
+                                                          child: Text(
+                                                            'Sau ăn',
+                                                            overflow:
+                                                                TextOverflow.ellipsis,
+                                                            maxLines: 1,
+                                                          ),
+                                                        ),
+                                                        Align(
+                                                          alignment:
+                                                              Alignment.centerLeft,
+                                                          child: Text(
+                                                            'Lúc đói',
+                                                            overflow:
+                                                                TextOverflow.ellipsis,
+                                                            maxLines: 1,
+                                                          ),
+                                                        ),
+                                                        Align(
+                                                          alignment:
+                                                              Alignment.centerLeft,
+                                                          child: Text(
+                                                            'Trước khi ngủ',
+                                                            overflow:
+                                                                TextOverflow.ellipsis,
+                                                            maxLines: 1,
+                                                          ),
+                                                        ),
+                                                      ],
+                                              onChanged: (String? value) {
+                                                if (value != null) {
+                                                  setState(() {
+                                                    selectedNote = value;
+                                                  });
+                                                }
+                                              },
+                                              items: const [
+                                                DropdownMenuItem<String>(
+                                                  value: 'Trước ăn',
+                                                  child: Text(
+                                                    'Trước ăn',
+                                                    overflow: TextOverflow.ellipsis,
+                                                    maxLines: 1,
                                                   ),
-                                                  Align(
-                                                    alignment:
-                                                        Alignment.centerLeft,
-                                                    child: Text(
-                                                      'Sau ăn',
-                                                      overflow:
-                                                          TextOverflow.ellipsis,
-                                                      maxLines: 1,
-                                                    ),
+                                                ),
+                                                DropdownMenuItem<String>(
+                                                  value: 'Sau ăn',
+                                                  child: Text(
+                                                    'Sau ăn',
+                                                    overflow: TextOverflow.ellipsis,
+                                                    maxLines: 1,
                                                   ),
-                                                  Align(
-                                                    alignment:
-                                                        Alignment.centerLeft,
-                                                    child: Text(
-                                                      'Lúc đói',
-                                                      overflow:
-                                                          TextOverflow.ellipsis,
-                                                      maxLines: 1,
-                                                    ),
+                                                ),
+                                                DropdownMenuItem<String>(
+                                                  value: 'Lúc đói',
+                                                  child: Text(
+                                                    'Lúc đói',
+                                                    overflow: TextOverflow.ellipsis,
+                                                    maxLines: 1,
                                                   ),
-                                                  Align(
-                                                    alignment:
-                                                        Alignment.centerLeft,
-                                                    child: Text(
-                                                      'Trước khi ngủ',
-                                                      overflow:
-                                                          TextOverflow.ellipsis,
-                                                      maxLines: 1,
-                                                    ),
+                                                ),
+                                                DropdownMenuItem<String>(
+                                                  value: 'Trước khi ngủ',
+                                                  child: Text(
+                                                    'Trước khi ngủ',
+                                                    overflow: TextOverflow.ellipsis,
+                                                    maxLines: 1,
                                                   ),
-                                                ],
-                                        onChanged: (String? value) {
-                                          if (value != null) {
-                                            setState(() {
-                                              selectedNote = value;
-                                            });
-                                          }
-                                        },
-                                        items: const [
-                                          DropdownMenuItem<String>(
-                                            value: 'Trước ăn',
-                                            child: Text(
-                                              'Trước ăn',
-                                              overflow: TextOverflow.ellipsis,
-                                              maxLines: 1,
+                                                ),
+                                              ],
                                             ),
                                           ),
-                                          DropdownMenuItem<String>(
-                                            value: 'Sau ăn',
-                                            child: Text(
-                                              'Sau ăn',
-                                              overflow: TextOverflow.ellipsis,
-                                              maxLines: 1,
-                                            ),
-                                          ),
-                                          DropdownMenuItem<String>(
-                                            value: 'Lúc đói',
-                                            child: Text(
-                                              'Lúc đói',
-                                              overflow: TextOverflow.ellipsis,
-                                              maxLines: 1,
-                                            ),
-                                          ),
-                                          DropdownMenuItem<String>(
-                                            value: 'Trước khi ngủ',
-                                            child: Text(
-                                              'Trước khi ngủ',
-                                              overflow: TextOverflow.ellipsis,
-                                              maxLines: 1,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
                                   ),
                           ),
                         ),
                       ],
                     ),
+                    if (isMealMode) ...[
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Container(
+                              height: 42,
+                              alignment: Alignment.center,
+                              margin: const EdgeInsets.symmetric(horizontal: 6),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFD7EAF4),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: TextField(
+                                controller: foodNameController,
+                                textAlign: TextAlign.center,
+                                decoration: const InputDecoration(
+                                  hintText: 'Tên món',
+                                  border: InputBorder.none,
+                                  isDense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                ),
+                                style: const TextStyle(
+                                  color: Color(0xFF17324F),
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            child: Container(
+                              height: 42,
+                              alignment: Alignment.center,
+                              margin: const EdgeInsets.symmetric(horizontal: 6),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFD7EAF4),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 8),
+                                child: DropdownButtonHideUnderline(
+                                  child: DropdownButton<String>(
+                                    value: selectedMealType,
+                                    isExpanded: true,
+                                    isDense: true,
+                                    alignment: Alignment.centerLeft,
+                                    borderRadius: BorderRadius.circular(10),
+                                    style: const TextStyle(
+                                      color: Color(0xFF17324F),
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                    icon: const Icon(
+                                      Icons.arrow_drop_down,
+                                      color: Color(0xFF17324F),
+                                    ),
+                                    onChanged: (String? value) {
+                                      if (value != null) {
+                                        setState(() {
+                                          selectedMealType = value;
+                                        });
+                                      }
+                                    },
+                                    items: const [
+                                      DropdownMenuItem<String>(
+                                        value: 'Bữa sáng',
+                                        child: Text('Bữa sáng'),
+                                      ),
+                                      DropdownMenuItem<String>(
+                                        value: 'Bữa trưa',
+                                        child: Text('Bữa trưa'),
+                                      ),
+                                      DropdownMenuItem<String>(
+                                        value: 'Bữa tối',
+                                        child: Text('Bữa tối'),
+                                      ),
+                                      DropdownMenuItem<String>(
+                                        value: 'Bữa phụ',
+                                        child: Text('Bữa phụ'),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
                     const SizedBox(height: 12),
                     Row(
                       children: [
@@ -815,8 +1108,14 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
                         const SizedBox(width: 12),
                         Expanded(
                           child: GestureDetector(
-                            onTap: selectedQuickType == 0 && !isSavingGlucose
-                                ? _saveGlucoseReading
+                            onTap: !isSavingGlucose
+                                ? selectedQuickType == 0
+                                      ? _saveGlucoseReading
+                                      : isMealMode
+                                      ? _saveMealEntry
+                                  : isMedicineMode
+                                  ? _saveMedicationEntry
+                                      : null
                                 : null,
                             child: _QuickActionChip(
                               label: isSavingGlucose ? 'Đang lưu...' : 'Lưu',
@@ -1282,39 +1581,67 @@ class _DiaryTab extends StatefulWidget {
 class _DiaryTabState extends State<_DiaryTab> {
   int selectedView = 0;
   int selectedFollowMode = 0;
+  final BackendApiService _backendApiService = BackendApiService.instance;
   final List<double> _glucose24hPoints = <double>[];
-  final math.Random _random = math.Random();
-  Timer? _liveDataTimer;
-  double _lastMockValue = 136;
+  double? _avgGlucose;
+  double? _variability;
+  double? _tir;
+  double? _hba1c;
 
   @override
   void initState() {
     super.initState();
-    _startMockLiveData();
+    unawaited(_loadGlucoseGraph24hData());
+    unawaited(_loadDiaryAnalytics());
   }
 
   @override
   void dispose() {
-    _liveDataTimer?.cancel();
     super.dispose();
   }
 
-  void _startMockLiveData() {
-    _liveDataTimer?.cancel();
-    _liveDataTimer = Timer.periodic(const Duration(seconds: 3), (_) {
-      if (!mounted) {
-        return;
-      }
-      final double change = (_random.nextDouble() * 18) - 9;
-      final double nextValue = (_lastMockValue + change).clamp(70, 190);
-      setState(() {
-        _lastMockValue = nextValue;
-        _glucose24hPoints.add(nextValue);
-        if (_glucose24hPoints.length > 24) {
-          _glucose24hPoints.removeAt(0);
-        }
-      });
+  Future<void> _loadGlucoseGraph24hData() async {
+    final List<GlucoseHistoryItemData> records = await _backendApiService
+        .fetchGlucoseHistoryLast24Hours();
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _glucose24hPoints
+        ..clear()
+        ..addAll(records.map((GlucoseHistoryItemData item) => item.glucoseValue));
     });
+  }
+
+  Future<void> _loadDiaryAnalytics() async {
+    final GlucoseAnalyticsData? analytics = await _backendApiService
+        .fetchGlucoseAnalytics(days: 1);
+    if (!mounted || analytics == null) {
+      return;
+    }
+
+    final List<double> values = analytics.chartValues;
+    final double? average = values.isEmpty
+        ? null
+        : values.reduce((double a, double b) => a + b) / values.length;
+    final double? variability = values.isEmpty
+        ? null
+        : values.reduce(math.max) - values.reduce(math.min);
+
+    setState(() {
+      _avgGlucose = average;
+      _variability = variability;
+      _tir = analytics.tir;
+      _hba1c = analytics.hba1c;
+    });
+  }
+
+  String _formatNumber(double? value, {int digits = 0}) {
+    if (value == null) {
+      return '--';
+    }
+    return value.toStringAsFixed(digits);
   }
 
   Widget _buildPersonalPanel(BuildContext context) {
@@ -1416,26 +1743,38 @@ class _DiaryTabState extends State<_DiaryTab> {
           ),
         ),
         const SizedBox(height: 12),
-        const Row(
+        Row(
           children: [
             Expanded(
-              child: _DiaryMetricTile(title: 'Trung bình', value: '136'),
+              child: _DiaryMetricTile(
+                title: 'Trung bình',
+                value: _formatNumber(_avgGlucose),
+              ),
             ),
-            SizedBox(width: 10),
+            const SizedBox(width: 10),
             Expanded(
-              child: _DiaryMetricTile(title: 'Dao động', value: '30'),
+              child: _DiaryMetricTile(
+                title: 'Dao động',
+                value: _formatNumber(_variability),
+              ),
             ),
           ],
         ),
         const SizedBox(height: 8),
-        const Row(
+        Row(
           children: [
             Expanded(
-              child: _DiaryMetricTile(title: 'TIR', value: '80%'),
+              child: _DiaryMetricTile(
+                title: 'TIR',
+                value: '${_formatNumber(_tir)}%',
+              ),
             ),
-            SizedBox(width: 10),
+            const SizedBox(width: 10),
             Expanded(
-              child: _DiaryMetricTile(title: 'HbA1c', value: '1.2%'),
+              child: _DiaryMetricTile(
+                title: 'HbA1c',
+                value: _formatNumber(_hba1c, digits: 1),
+              ),
             ),
           ],
         ),

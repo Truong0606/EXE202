@@ -99,6 +99,72 @@ class BackendApiService {
     throw Exception(message);
   }
 
+  Future<Map<String, dynamic>> createMealEntry({
+    required String foodName,
+    required String mealType,
+    required double calories,
+    required double carbs,
+    required DateTime recordedAt,
+  }) async {
+    final Uri uri = Uri.parse('$_baseUrl/v1/meals');
+    final Map<String, String> headers = await _authorizedHeaders();
+    final http.Response response = await http.post(
+      uri,
+      headers: <String, String>{
+        ...headers,
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(<String, dynamic>{
+        'foodName': foodName,
+        'mealType': mealType,
+        'calories': calories,
+        'carbs': carbs,
+        'recordedAt': recordedAt.toUtc().toIso8601String(),
+      }),
+    );
+
+    final Map<String, dynamic> body = _safeDecodeMap(response.body);
+    if (response.statusCode == 201 || response.statusCode == 200) {
+      return body;
+    }
+
+    final String message =
+        (body['message'] ?? 'Không thể ghi nhận bữa ăn').toString();
+    throw Exception(message);
+  }
+
+  Future<Map<String, dynamic>> createMedicationEntry({
+    required String medicineName,
+    required double dosage,
+    required String unit,
+    required DateTime recordedAt,
+  }) async {
+    final Uri uri = Uri.parse('$_baseUrl/v1/medications');
+    final Map<String, String> headers = await _authorizedHeaders();
+    final http.Response response = await http.post(
+      uri,
+      headers: <String, String>{
+        ...headers,
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(<String, dynamic>{
+        'medicineName': medicineName,
+        'dosage': dosage,
+        'unit': unit,
+        'recordedAt': recordedAt.toUtc().toIso8601String(),
+      }),
+    );
+
+    final Map<String, dynamic> body = _safeDecodeMap(response.body);
+    if (response.statusCode == 201 || response.statusCode == 200) {
+      return body;
+    }
+
+    final String message =
+        (body['message'] ?? 'Không thể ghi nhận uống thuốc').toString();
+    throw Exception(message);
+  }
+
   Future<BlogArticleData?> fetchLatestBlogArticle() async {
     final Map<String, dynamic>? json = await _getJson('/api/blog/latest');
     if (json == null) {
@@ -142,6 +208,175 @@ class BackendApiService {
     }
 
     return UserProfileData.fromJson(data);
+  }
+
+  Future<List<GlucoseHistoryItemData>> fetchGlucoseHistory({
+    int page = 1,
+    int limit = 50,
+    DateTime? startDate,
+    DateTime? endDate,
+  }) async {
+    final Map<String, String> query = <String, String>{
+      'page': '$page',
+      'limit': '$limit',
+    };
+    if (startDate != null) {
+      query['startDate'] = _formatDateOnly(startDate);
+    }
+    if (endDate != null) {
+      query['endDate'] = _formatDateOnly(endDate);
+    }
+
+    final Uri uri = Uri.parse(
+      '$_baseUrl/v1/glucose/history',
+    ).replace(queryParameters: query);
+    final http.Response response = await http.get(
+      uri,
+      headers: await _authorizedHeaders(),
+    );
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return const <GlucoseHistoryItemData>[];
+    }
+
+    final Map<String, dynamic> payload = _safeDecodeMap(response.body);
+    final dynamic data = payload['data'];
+    if (data is! List) {
+      return const <GlucoseHistoryItemData>[];
+    }
+
+    return data
+        .whereType<Map<String, dynamic>>()
+        .map(GlucoseHistoryItemData.fromJson)
+        .toList();
+  }
+
+  Future<List<GlucoseHistoryItemData>> fetchGlucoseHistoryByDate(
+    DateTime date,
+  ) async {
+    final DateTime target = DateTime(date.year, date.month, date.day);
+    final DateTime nextDay = target.add(const Duration(days: 1));
+
+    final List<GlucoseHistoryItemData> filteredRecords = await fetchGlucoseHistory(
+      page: 1,
+      limit: 10,
+      startDate: target,
+      endDate: nextDay,
+    );
+
+    final List<GlucoseHistoryItemData> unfilteredRecords = await fetchGlucoseHistory(
+      page: 1,
+      limit: 10,
+    );
+
+    final Map<String, GlucoseHistoryItemData> mergedById =
+        <String, GlucoseHistoryItemData>{
+          for (final GlucoseHistoryItemData item in filteredRecords) item.id: item,
+          for (final GlucoseHistoryItemData item in unfilteredRecords) item.id: item,
+        };
+
+    final List<GlucoseHistoryItemData> records = mergedById.values.where((
+      GlucoseHistoryItemData item,
+    ) {
+      final DateTime recordedLocal = item.recordedAt.toLocal();
+      final bool inRecordedRange = !recordedLocal.isBefore(target) &&
+          recordedLocal.isBefore(nextDay);
+
+      final DateTime? createdLocal = item.createdAt?.toLocal();
+      final bool inCreatedRange = createdLocal != null &&
+          !createdLocal.isBefore(target) &&
+          createdLocal.isBefore(nextDay);
+
+      return inRecordedRange || inCreatedRange;
+    }).toList();
+
+    records.sort(
+      (GlucoseHistoryItemData a, GlucoseHistoryItemData b) =>
+          a.recordedAt.compareTo(b.recordedAt),
+    );
+    return records;
+  }
+
+  Future<List<GlucoseHistoryItemData>> fetchGlucoseHistoryLast24Hours() async {
+    final List<GlucoseHistoryItemData> records = await fetchGlucoseHistory(
+      page: 1,
+      limit: 100,
+    );
+    final DateTime threshold = DateTime.now().toUtc().subtract(
+      const Duration(hours: 24),
+    );
+
+    final List<GlucoseHistoryItemData> filtered = records
+        .where((GlucoseHistoryItemData item) => item.recordedAt.isAfter(threshold))
+        .toList();
+    filtered.sort(
+      (GlucoseHistoryItemData a, GlucoseHistoryItemData b) =>
+          a.recordedAt.compareTo(b.recordedAt),
+    );
+    return filtered;
+  }
+
+  Future<GlucoseHistoryItemData?> fetchLatestGlucoseHistory() async {
+    final List<GlucoseHistoryItemData> records = await fetchGlucoseHistory(
+      page: 1,
+      limit: 50,
+    );
+    if (records.isEmpty) {
+      return null;
+    }
+
+    records.sort(
+      (GlucoseHistoryItemData a, GlucoseHistoryItemData b) =>
+          b.recordedAt.compareTo(a.recordedAt),
+    );
+    return records.first;
+  }
+
+  Future<double?> fetchWeeklyComplianceScore() async {
+    final Uri uri = Uri.parse('$_baseUrl/v1/glucose/reports/summary?days=7');
+    final http.Response response = await http.get(
+      uri,
+      headers: await _authorizedHeaders(),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return null;
+    }
+
+    final Map<String, dynamic> payload = _safeDecodeMap(response.body);
+    final dynamic data = payload['data'];
+    if (data is! Map<String, dynamic>) {
+      return null;
+    }
+
+    final dynamic compliance = data['compliance'];
+    if (compliance is! Map<String, dynamic>) {
+      return null;
+    }
+
+    final dynamic score = compliance['score'];
+    if (score is num) {
+      return score.toDouble();
+    }
+    return double.tryParse(score?.toString() ?? '');
+  }
+
+  Future<GlucoseAnalyticsData?> fetchGlucoseAnalytics({int days = 1}) async {
+    final Uri uri = Uri.parse('$_baseUrl/v1/glucose/analytics?days=$days');
+    final http.Response response = await http.get(
+      uri,
+      headers: await _authorizedHeaders(),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return null;
+    }
+
+    final Map<String, dynamic> payload = _safeDecodeMap(response.body);
+    final dynamic data = payload['data'];
+    if (data is! Map<String, dynamic>) {
+      return null;
+    }
+
+    return GlucoseAnalyticsData.fromJson(data);
   }
 
   Future<Map<String, dynamic>?> _getJson(String path) async {
@@ -193,5 +428,19 @@ class BackendApiService {
     }
 
     return <String, String>{'Authorization': 'Bearer $accessToken'};
+  }
+
+  String _formatDateOnly(DateTime value) {
+    final DateTime local = value.toLocal();
+    final String year = local.year.toString().padLeft(4, '0');
+    final String month = local.month.toString().padLeft(2, '0');
+    final String day = local.day.toString().padLeft(2, '0');
+    return '$year-$month-$day';
+  }
+
+  bool _isSameDate(DateTime first, DateTime second) {
+    return first.year == second.year &&
+        first.month == second.month &&
+        first.day == second.day;
   }
 }

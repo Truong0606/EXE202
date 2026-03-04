@@ -84,9 +84,6 @@ class _RegisterPageState extends State<RegisterPage> {
       setState(() {
         isPasswordStep = true;
         acceptedTerms = true;
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Đăng nhập thành công')),
-            );
       });
       return;
     }
@@ -99,15 +96,6 @@ class _RegisterPageState extends State<RegisterPage> {
     final String password = passwordController.text.trim();
 
     if (password.length < _minPasswordLength) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            widget.continueToProfileSetup
-                ? 'Mật khẩu phải có ít nhất 8 ký tự'
-                : 'Mật khẩu chưa hợp lệ',
-          ),
-        ),
-      );
       return;
     }
 
@@ -147,15 +135,10 @@ class _RegisterPageState extends State<RegisterPage> {
           password: password,
         ),
       );
-    } catch (error) {
+    } catch (_) {
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(error.toString().replaceFirst('Exception: ', '')),
-        ),
-      );
     } finally {
       if (mounted) {
         setState(() {

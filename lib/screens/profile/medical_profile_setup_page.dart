@@ -110,20 +110,12 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
       setState(() {
         showValidationErrors = true;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Vui lòng điền đầy đủ thông tin hồ sơ')),
-      );
       return;
     }
 
     final String? phoneNumber = widget.args?.phoneNumber;
     final String? password = widget.args?.password;
     if (phoneNumber == null || password == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Thiếu thông tin đăng ký, vui lòng thử lại'),
-        ),
-      );
       return;
     }
 
@@ -149,23 +141,14 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
         return;
       }
 
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Đăng ký thành công')));
-
       Navigator.of(context).pushNamed(
         AppRoutes.profileGreeting,
         arguments: ProfileGreetingRouteArgs(name: fullName),
       );
-    } catch (error) {
+    } catch (_) {
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(error.toString().replaceFirst('Exception: ', '')),
-        ),
-      );
     } finally {
       if (mounted) {
         setState(() {
