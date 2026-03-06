@@ -30,6 +30,7 @@ class _RegisterPageState extends State<RegisterPage> {
   bool isValidPhone = false;
   bool isPasswordStep = false;
   bool isValidPassword = false;
+  bool isPasswordVisible = false;
   bool isSubmitting = false;
 
   final TextEditingController phoneController = TextEditingController();
@@ -213,7 +214,7 @@ class _RegisterPageState extends State<RegisterPage> {
                           const SizedBox(height: 18),
                           TextField(
                             controller: passwordController,
-                            obscureText: true,
+                            obscureText: !isPasswordVisible,
                             textAlign: TextAlign.center,
                             onChanged: (value) {
                               final bool nextIsValidPassword =
@@ -228,24 +229,37 @@ class _RegisterPageState extends State<RegisterPage> {
                               color: AppColors.primaryBlue,
                               fontSize: 26,
                             ),
-                            decoration: const InputDecoration(
+                            decoration: InputDecoration(
                               isDense: true,
                               hintText: 'Nhập mật khẩu',
-                              hintStyle: TextStyle(
+                              hintStyle: const TextStyle(
                                 color: AppColors.primaryBlue,
                                 fontSize: 30,
                                 fontWeight: FontWeight.w500,
                               ),
-                              enabledBorder: UnderlineInputBorder(
+                              enabledBorder: const UnderlineInputBorder(
                                 borderSide: BorderSide(
                                   color: AppColors.lightBlue,
                                   width: 2,
                                 ),
                               ),
-                              focusedBorder: UnderlineInputBorder(
+                              focusedBorder: const UnderlineInputBorder(
                                 borderSide: BorderSide(
                                   color: AppColors.primaryBlue,
                                   width: 2,
+                                ),
+                              ),
+                              suffixIcon: IconButton(
+                                onPressed: () {
+                                  setState(() {
+                                    isPasswordVisible = !isPasswordVisible;
+                                  });
+                                },
+                                icon: Icon(
+                                  isPasswordVisible
+                                      ? Icons.visibility_off_outlined
+                                      : Icons.visibility_outlined,
+                                  color: AppColors.primaryBlue,
                                 ),
                               ),
                             ),
