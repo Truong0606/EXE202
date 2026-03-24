@@ -12,7 +12,7 @@ class BackendApiService {
 
   static const String _baseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'https://glucare-api.onrender.com',
+    defaultValue: 'https://glucare-api.vercel.app',
   );
 
   Future<Map<String, dynamic>> registerPatient({
