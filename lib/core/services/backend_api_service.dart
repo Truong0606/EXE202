@@ -1,8 +1,11 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:first_app/core/models/dashboard_models.dart';
 import 'package:first_app/core/services/auth_storage_service.dart';
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
+import 'package:mime/mime.dart';
 
 class BackendApiService {
   BackendApiService._();
@@ -379,6 +382,142 @@ class BackendApiService {
     return GlucoseAnalyticsData.fromJson(data);
   }
 
+  Future<AiChatResultData> sendAiChatMessage({
+    String? message,
+    String? sessionId,
+    File? file,
+  }) async {
+    final String trimmedMessage = (message ?? '').trim();
+    final String trimmedSessionId = (sessionId ?? '').trim();
+    if (trimmedMessage.isEmpty && file == null) {
+      throw Exception('Vui lòng nhập tin nhắn hoặc đính kèm tệp');
+    }
+
+    final Uri uri = Uri.parse('$_baseUrl/v1/ai/chat');
+    final http.MultipartRequest request = http.MultipartRequest('POST', uri)
+      ..headers.addAll(await _authorizedHeaders());
+
+    if (trimmedMessage.isNotEmpty) {
+      request.fields['message'] = trimmedMessage;
+    }
+    if (trimmedSessionId.isNotEmpty) {
+      request.fields['sessionId'] = trimmedSessionId;
+    }
+    if (file != null) {
+      final MediaType? contentType = _resolveUploadContentType(file.path);
+      request.files.add(
+        await http.MultipartFile.fromPath(
+          'file',
+          file.path,
+          filename: _fileNameFromPath(file.path),
+          contentType: contentType,
+        ),
+      );
+    }
+
+    final http.StreamedResponse streamedResponse = await request.send();
+    final http.Response response = await http.Response.fromStream(streamedResponse);
+    final Map<String, dynamic> body = _safeDecodeMap(response.body);
+
+    if (response.statusCode == 200 || response.statusCode == 201) {
+      final Map<String, dynamic> data = _extractDataMap(body);
+      return AiChatResultData.fromJson(data);
+    }
+
+    final String messageText = (body['message'] ?? 'Không thể gửi tin nhắn tới AI').toString();
+    throw Exception(messageText);
+  }
+
+  Future<List<AiChatSessionSummaryData>> fetchAiSessions() async {
+    final dynamic response = await _getDynamic('/v1/ai/sessions');
+    final List<Map<String, dynamic>> items = _extractDataList(response);
+    final List<AiChatSessionSummaryData> sessions = items
+        .map(AiChatSessionSummaryData.fromJson)
+        .where((AiChatSessionSummaryData item) => item.id.isNotEmpty)
+        .toList();
+
+    sessions.sort((AiChatSessionSummaryData first, AiChatSessionSummaryData second) {
+      final DateTime firstUpdated = first.updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final DateTime secondUpdated = second.updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      return secondUpdated.compareTo(firstUpdated);
+    });
+    return sessions;
+  }
+
+  Future<List<AiChatMessageData>> fetchAiSessionMessages(
+    String sessionId, {
+    int page = 1,
+    int limit = 100,
+  }) async {
+    final Uri uri = Uri.parse(
+      '$_baseUrl/v1/ai/sessions/$sessionId/messages?page=$page&limit=$limit',
+    );
+    final http.Response response = await http.get(
+      uri,
+      headers: await _authorizedHeaders(),
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      return const <AiChatMessageData>[];
+    }
+
+    final dynamic payload = jsonDecode(response.body);
+    final List<Map<String, dynamic>> items = _extractDataList(payload);
+    final List<AiChatMessageData> messages = items
+        .map(AiChatMessageData.fromJson)
+        .where((AiChatMessageData item) => item.text.isNotEmpty || item.attachmentName != null)
+        .toList();
+
+    messages.sort((AiChatMessageData first, AiChatMessageData second) {
+      final DateTime firstCreated = first.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final DateTime secondCreated = second.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      return firstCreated.compareTo(secondCreated);
+    });
+    return messages;
+  }
+
+  Future<void> renameAiSession(String sessionId, String title) async {
+    final String trimmedTitle = title.trim();
+    if (trimmedTitle.isEmpty) {
+      throw Exception('Tên cuộc trò chuyện không được để trống');
+    }
+
+    final Uri uri = Uri.parse('$_baseUrl/v1/ai/sessions/$sessionId');
+    final http.Response response = await http.patch(
+      uri,
+      headers: <String, String>{
+        ...await _authorizedHeaders(),
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(<String, dynamic>{'title': trimmedTitle}),
+    );
+
+    if (response.statusCode >= 200 && response.statusCode < 300) {
+      return;
+    }
+
+    final Map<String, dynamic> body = _safeDecodeMap(response.body);
+    final String message =
+        (body['message'] ?? 'Không thể đổi tên cuộc trò chuyện').toString();
+    throw Exception(message);
+  }
+
+  Future<void> deleteAiSession(String sessionId) async {
+    final Uri uri = Uri.parse('$_baseUrl/v1/ai/sessions/$sessionId');
+    final http.Response response = await http.delete(
+      uri,
+      headers: await _authorizedHeaders(),
+    );
+
+    if (response.statusCode >= 200 && response.statusCode < 300) {
+      return;
+    }
+
+    final Map<String, dynamic> body = _safeDecodeMap(response.body);
+    final String message =
+        (body['message'] ?? 'Không thể xóa cuộc trò chuyện').toString();
+    throw Exception(message);
+  }
+
   Future<Map<String, dynamic>?> _getJson(String path) async {
     final dynamic response = await _getDynamic(path);
     return response is Map<String, dynamic> ? response : null;
@@ -407,6 +546,34 @@ class BackendApiService {
       return data;
     }
     return payload;
+  }
+
+  List<Map<String, dynamic>> _extractDataList(dynamic payload) {
+    if (payload is List) {
+      return payload.whereType<Map<String, dynamic>>().toList();
+    }
+
+    if (payload is Map<String, dynamic>) {
+      final dynamic data = payload['data'];
+      if (data is List) {
+        return data.whereType<Map<String, dynamic>>().toList();
+      }
+      if (data is Map<String, dynamic>) {
+        final dynamic nestedList =
+            data['items'] ?? data['list'] ?? data['results'] ?? data['messages'] ?? data['sessions'];
+        if (nestedList is List) {
+          return nestedList.whereType<Map<String, dynamic>>().toList();
+        }
+      }
+
+      final dynamic directList =
+          payload['items'] ?? payload['list'] ?? payload['results'] ?? payload['messages'] ?? payload['sessions'];
+      if (directList is List) {
+        return directList.whereType<Map<String, dynamic>>().toList();
+      }
+    }
+
+    return const <Map<String, dynamic>>[];
   }
 
   Map<String, dynamic> _safeDecodeMap(String body) {
@@ -438,9 +605,200 @@ class BackendApiService {
     return '$year-$month-$day';
   }
 
-  bool _isSameDate(DateTime first, DateTime second) {
-    return first.year == second.year &&
-        first.month == second.month &&
-        first.day == second.day;
+  MediaType? _resolveUploadContentType(String filePath) {
+    final String? mimeType = lookupMimeType(filePath);
+    if (mimeType == null || !mimeType.contains('/')) {
+      return null;
+    }
+
+    final List<String> parts = mimeType.split('/');
+    if (parts.length != 2) {
+      return null;
+    }
+
+    return MediaType(parts[0], parts[1]);
   }
+
+  String _fileNameFromPath(String filePath) {
+    final List<String> segments = filePath.split(RegExp(r'[\\/]'));
+    return segments.isEmpty ? filePath : segments.last;
+  }
+}
+
+class AiChatResultData {
+  const AiChatResultData({
+    required this.reply,
+    this.sessionId,
+    this.rawData = const <String, dynamic>{},
+  });
+
+  final String reply;
+  final String? sessionId;
+  final Map<String, dynamic> rawData;
+
+  factory AiChatResultData.fromJson(Map<String, dynamic> json) {
+    String? firstNonEmptyString(List<dynamic> values) {
+      for (final dynamic value in values) {
+        final String text = (value ?? '').toString().trim();
+        if (text.isNotEmpty && text.toLowerCase() != 'null') {
+          return text;
+        }
+      }
+      return null;
+    }
+
+    Map<String, dynamic>? asMap(dynamic value) {
+      return value is Map<String, dynamic> ? value : null;
+    }
+
+    final Map<String, dynamic>? result = asMap(json['result']);
+    final Map<String, dynamic>? message = asMap(json['message']);
+    final Map<String, dynamic>? assistantMessage = asMap(json['assistantMessage']);
+    final Map<String, dynamic>? response = asMap(json['response']);
+
+    final String reply = firstNonEmptyString(<dynamic>[
+          json['reply'],
+          json['responseText'],
+          json['assistantReply'],
+          json['content'],
+          json['text'],
+          json['message'],
+          result?['reply'],
+          result?['responseText'],
+          result?['assistantReply'],
+          result?['content'],
+          result?['text'],
+          message?['content'],
+          message?['text'],
+          assistantMessage?['content'],
+          assistantMessage?['text'],
+          response?['content'],
+          response?['text'],
+        ]) ??
+        'Mình đã nhận được thông tin của bạn.';
+
+    final String? sessionId = firstNonEmptyString(<dynamic>[
+      json['sessionId'],
+      json['threadId'],
+      result?['sessionId'],
+      result?['threadId'],
+      message?['sessionId'],
+      response?['sessionId'],
+    ]);
+
+    return AiChatResultData(
+      reply: reply,
+      sessionId: sessionId,
+      rawData: json,
+    );
+  }
+}
+
+class AiChatSessionSummaryData {
+  const AiChatSessionSummaryData({
+    required this.id,
+    required this.title,
+    this.updatedAt,
+    this.preview,
+  });
+
+  final String id;
+  final String title;
+  final DateTime? updatedAt;
+  final String? preview;
+
+  factory AiChatSessionSummaryData.fromJson(Map<String, dynamic> json) {
+    final String id = _readFirstString(json, <String>['id', 'sessionId', 'threadId']);
+    final String title = _readFirstString(
+      json,
+      <String>['title', 'name', 'sessionTitle'],
+      fallback: 'Cuộc trò chuyện',
+    );
+    return AiChatSessionSummaryData(
+      id: id,
+      title: title,
+      updatedAt: _readFirstDateTime(json, <String>['updatedAt', 'lastMessageAt', 'createdAt']),
+      preview: _readNullableString(json, <String>['preview', 'lastMessage', 'content', 'message']),
+    );
+  }
+}
+
+class AiChatMessageData {
+  const AiChatMessageData({
+    required this.text,
+    required this.isUser,
+    this.attachmentName,
+    this.createdAt,
+    this.disclaimer,
+  });
+
+  final String text;
+  final bool isUser;
+  final String? attachmentName;
+  final DateTime? createdAt;
+  final String? disclaimer;
+
+  factory AiChatMessageData.fromJson(Map<String, dynamic> json) {
+    final String role = _readFirstString(
+      json,
+      <String>['role', 'senderRole', 'authorRole', 'type'],
+      fallback: '',
+    ).toLowerCase();
+    final bool isUser = json['isUser'] == true ||
+        role.contains('user') ||
+        role.contains('patient') ||
+        role.contains('human');
+
+    final dynamic attachment = json['file'] ?? json['attachment'] ?? json['media'];
+    String? attachmentName;
+    if (attachment is Map<String, dynamic>) {
+      attachmentName = _readNullableString(attachment, <String>['name', 'fileName', 'originalName']);
+    }
+
+    return AiChatMessageData(
+      text: _readFirstString(
+        json,
+        <String>['content', 'text', 'message', 'body'],
+        fallback: '',
+      ),
+      isUser: isUser,
+      attachmentName: attachmentName,
+      createdAt: _readFirstDateTime(json, <String>['createdAt', 'updatedAt', 'sentAt']),
+      disclaimer: _readNullableString(json, <String>['medicalDisclaimer', 'disclaimer']),
+    );
+  }
+}
+
+String _readFirstString(
+  Map<String, dynamic> json,
+  List<String> keys, {
+  String fallback = '',
+}) {
+  for (final String key in keys) {
+    final String value = (json[key] ?? '').toString().trim();
+    if (value.isNotEmpty && value.toLowerCase() != 'null') {
+      return value;
+    }
+  }
+  return fallback;
+}
+
+String? _readNullableString(Map<String, dynamic> json, List<String> keys) {
+  final String value = _readFirstString(json, keys);
+  return value.isEmpty ? null : value;
+}
+
+DateTime? _readFirstDateTime(Map<String, dynamic> json, List<String> keys) {
+  for (final String key in keys) {
+    final String raw = (json[key] ?? '').toString().trim();
+    if (raw.isEmpty || raw.toLowerCase() == 'null') {
+      continue;
+    }
+
+    final DateTime? parsed = DateTime.tryParse(raw);
+    if (parsed != null) {
+      return parsed;
+    }
+  }
+  return null;
 }

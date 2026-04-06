@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:first_app/core/models/dashboard_models.dart';
@@ -6,9 +7,14 @@ import 'package:first_app/core/services/auth_storage_service.dart';
 import 'package:first_app/core/services/backend_api_service.dart';
 import 'package:first_app/core/services/notification_service.dart';
 import 'package:first_app/core/theme/app_colors.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:first_app/navigation/app_routes.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:record/record.dart';
 
 part 'home_page_extras.dart';
 
@@ -164,9 +170,10 @@ class _DashboardTabState extends State<_DashboardTab> {
   static const int _weeklyGoalPercent = 40;
   final BackendApiService _backendApiService = BackendApiService.instance;
 
-  DateTime displayedMonth = DateTime(DateTime.now().year, DateTime.now().month);
   DateTime selectedDate = DateTime.now();
   final List<double> _glucose24hPoints = <double>[];
+  List<GlucoseHistoryItemData> _selectedDateRecords =
+      const <GlucoseHistoryItemData>[];
   GlucoseHistoryItemData? _latestGlucoseHistory;
   double? _weeklyComplianceScore;
 
@@ -176,6 +183,7 @@ class _DashboardTabState extends State<_DashboardTab> {
     unawaited(_loadLatestGlucoseHistory());
     unawaited(_loadGlucoseGraph24hData());
     unawaited(_loadWeeklyComplianceScore());
+    unawaited(_loadSelectedDateRecords());
     unawaited(
       NotificationService.instance.notifyWeeklyGoalReachedIfNeeded(
         glucoseGoalPercent: _glucoseGoalPercent,
@@ -220,7 +228,20 @@ class _DashboardTabState extends State<_DashboardTab> {
       _loadLatestGlucoseHistory(),
       _loadGlucoseGraph24hData(),
       _loadWeeklyComplianceScore(),
+      _loadSelectedDateRecords(),
     ]);
+  }
+
+  Future<void> _loadSelectedDateRecords() async {
+    final List<GlucoseHistoryItemData> records = await _backendApiService
+        .fetchGlucoseHistoryByDate(selectedDate);
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _selectedDateRecords = records.reversed.toList();
+    });
   }
 
   Future<void> _loadWeeklyComplianceScore() async {
@@ -290,6 +311,25 @@ class _DashboardTabState extends State<_DashboardTab> {
     return value.toStringAsFixed(1);
   }
 
+  Future<void> _pickSelectedDate() async {
+    final DateTime now = DateTime.now();
+    final DateTime? picked = await showDatePicker(
+      context: context,
+      initialDate: selectedDate,
+      firstDate: DateTime(now.year - 2),
+      lastDate: DateTime(now.year, now.month, now.day),
+      helpText: 'Chọn ngày xem dữ liệu',
+    );
+    if (picked == null || !mounted) {
+      return;
+    }
+
+    setState(() {
+      selectedDate = DateTime(picked.year, picked.month, picked.day);
+    });
+    await _loadSelectedDateRecords();
+  }
+
   Future<void> _showDayHistoryPopup(DateTime day) async {
     final List<GlucoseHistoryItemData> records = await _backendApiService
         .fetchGlucoseHistoryByDate(day);
@@ -336,76 +376,8 @@ class _DashboardTabState extends State<_DashboardTab> {
     );
   }
 
-  List<int?> _buildCalendarCells(DateTime month) {
-    final DateTime firstDay = DateTime(month.year, month.month, 1);
-    final int daysInMonth = DateTime(month.year, month.month + 1, 0).day;
-
-    final int leadingEmpty = (firstDay.weekday + 6) % 7;
-    final List<int?> cells = List<int?>.filled(
-      leadingEmpty,
-      null,
-      growable: true,
-    );
-    cells.addAll(List<int?>.generate(daysInMonth, (index) => index + 1));
-
-    while (cells.length % 7 != 0) {
-      cells.add(null);
-    }
-    return cells;
-  }
-
-  void _goToPreviousMonth() {
-    setState(() {
-      displayedMonth = DateTime(displayedMonth.year, displayedMonth.month - 1);
-      final int day = selectedDate.day;
-      final int maxDay = DateTime(
-        displayedMonth.year,
-        displayedMonth.month + 1,
-        0,
-      ).day;
-      selectedDate = DateTime(
-        displayedMonth.year,
-        displayedMonth.month,
-        day > maxDay ? maxDay : day,
-      );
-    });
-  }
-
-  void _goToNextMonth() {
-    final DateTime now = DateTime.now();
-    final DateTime latestAllowed = DateTime(now.year, now.month);
-    final DateTime nextMonth = DateTime(
-      displayedMonth.year,
-      displayedMonth.month + 1,
-    );
-    if (nextMonth.isAfter(latestAllowed)) {
-      return;
-    }
-
-    setState(() {
-      displayedMonth = nextMonth;
-      final int day = selectedDate.day;
-      final int maxDay = DateTime(
-        displayedMonth.year,
-        displayedMonth.month + 1,
-        0,
-      ).day;
-      selectedDate = DateTime(
-        displayedMonth.year,
-        displayedMonth.month,
-        day > maxDay ? maxDay : day,
-      );
-    });
-  }
-
   @override
   Widget build(BuildContext context) {
-    final DateTime now = DateTime.now();
-    final DateTime latestAllowedMonth = DateTime(now.year, now.month);
-    final bool canGoNext = !DateTime(
-      displayedMonth.year,
-      displayedMonth.month,
-    ).isAtSameMomentAs(latestAllowedMonth);
     final String latestGlucose = _latestGlucoseHistory == null
       ? '--'
       : _latestGlucoseHistory!.glucoseValue.round().toString();
@@ -416,16 +388,6 @@ class _DashboardTabState extends State<_DashboardTab> {
       ? '--:--'
       : _formatRecordedAtLabel(_latestGlucoseHistory!.recordedAt);
     final String weeklyScoreText = _formatScore(_weeklyComplianceScore);
-    final List<int?> calendarCells = _buildCalendarCells(displayedMonth);
-    const List<String> weekdays = [
-      'Th.2',
-      'Th.3',
-      'Th.4',
-      'Th.5',
-      'Th.6',
-      'Th.7',
-      'CN',
-    ];
 
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(8, 0, 8, 0),
@@ -771,8 +733,8 @@ class _DashboardTabState extends State<_DashboardTab> {
                                 SizedBox(
                                   width: 74,
                                   height: 74,
-                                  child: CustomPaint(
-                                    painter: _GoalProgressRingPainter(),
+                                  child: _AnimatedGoalHeart(
+                                    score: _weeklyComplianceScore,
                                   ),
                                 ),
                               ],
@@ -846,7 +808,7 @@ class _DashboardTabState extends State<_DashboardTab> {
                 ),
                 const SizedBox(height: 14),
                 Text(
-                  'Theo dõi mục tiêu tháng ${displayedMonth.month}',
+                  'Theo dõi theo ngày',
                   style: const TextStyle(
                     color: Color(0xFF12355A),
                     fontSize: 24,
@@ -866,120 +828,123 @@ class _DashboardTabState extends State<_DashboardTab> {
                     borderRadius: BorderRadius.circular(14),
                   ),
                   child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Row(
                         children: [
-                          IconButton(
-                            onPressed: _goToPreviousMonth,
-                            icon: const Icon(
-                              Icons.chevron_left,
-                              color: Color(0xFF16395B),
-                            ),
-                          ),
                           Expanded(
-                            child: Text(
-                              'Tháng ${displayedMonth.month}/${displayedMonth.year}',
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                color: Color(0xFF16395B),
-                                fontSize: 14,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ),
-                          IconButton(
-                            onPressed: canGoNext ? _goToNextMonth : null,
-                            icon: Icon(
-                              Icons.chevron_right,
-                              color: canGoNext
-                                  ? const Color(0xFF16395B)
-                                  : const Color(0x6616395B),
-                            ),
-                          ),
-                        ],
-                      ),
-                      Row(
-                        children: [
-                          for (final label in weekdays)
-                            Expanded(
-                              child: Text(
-                                label,
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(
-                                  color: Color(0xFF16395B),
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w700,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Ngày đang xem',
+                                  style: TextStyle(
+                                    color: Color(0xFF5A7F99),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  _formatDayLabel(selectedDate),
+                                  style: const TextStyle(
+                                    color: Color(0xFF16395B),
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          InkWell(
+                            borderRadius: BorderRadius.circular(12),
+                            onTap: _pickSelectedDate,
+                            child: Container(
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFD6ECF8),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: const Icon(
+                                Icons.calendar_month_outlined,
+                                color: Color(0xFF16395B),
+                                size: 22,
                               ),
                             ),
+                          ),
                         ],
                       ),
                       const SizedBox(height: 8),
-                      GridView.builder(
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
-                        itemCount: calendarCells.length,
-                        gridDelegate:
-                            const SliverGridDelegateWithFixedCrossAxisCount(
-                              crossAxisCount: 7,
-                              mainAxisSpacing: 4,
-                              crossAxisSpacing: 4,
-                              childAspectRatio: 1.45,
+                      if (_selectedDateRecords.isEmpty)
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 14,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFD6ECF8),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Text(
+                            'Không có dữ liệu trong ngày này',
+                            style: TextStyle(
+                              color: Color(0xFF507089),
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
                             ),
-                        itemBuilder: (context, index) {
-                          final int? day = calendarCells[index];
-                          final bool selected =
-                              day != null &&
-                              selectedDate.year == displayedMonth.year &&
-                              selectedDate.month == displayedMonth.month &&
-                              selectedDate.day == day;
-
-                          if (day == null) {
-                            return const SizedBox.shrink();
-                          }
-
-                          return InkWell(
-                            borderRadius: BorderRadius.circular(10),
-                            onTap: () async {
-                              final DateTime pickedDate = DateTime(
-                                displayedMonth.year,
-                                displayedMonth.month,
-                                day,
-                              );
-                              setState(() {
-                                selectedDate = pickedDate;
-                              });
-                              await _showDayHistoryPopup(pickedDate);
-                            },
-                            child: Container(
+                          ),
+                        )
+                      else
+                        Column(
+                          children: _selectedDateRecords.map((record) {
+                            return Container(
+                              width: double.infinity,
+                              margin: const EdgeInsets.only(bottom: 8),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 12,
+                              ),
                               decoration: BoxDecoration(
-                                color: selected
-                                    ? const Color(0xFFD5E9F6)
-                                    : Colors.transparent,
-                                borderRadius: BorderRadius.circular(10),
-                                boxShadow: selected
-                                    ? const [
-                                        BoxShadow(
-                                          color: Color(0x30000000),
-                                          blurRadius: 6,
-                                          offset: Offset(0, 3),
-                                        ),
-                                      ]
-                                    : null,
+                                color: const Color(0xFFD6ECF8),
+                                borderRadius: BorderRadius.circular(12),
                               ),
-                              alignment: Alignment.center,
-                              child: Text(
-                                '$day',
-                                style: const TextStyle(
-                                  color: Color(0xFF16395B),
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w500,
-                                ),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      _formatTimeOnly(record.recordedAt),
+                                      style: const TextStyle(
+                                        color: Color(0xFF16395B),
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                  Expanded(
+                                    flex: 2,
+                                    child: Text(
+                                      _mealContextLabel(record.mealContext),
+                                      style: const TextStyle(
+                                        color: Color(0xFF4C718A),
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                                  Text(
+                                    '${_formatGlucoseValue(record.glucoseValue)} mg/dL',
+                                    style: const TextStyle(
+                                      color: Color(0xFF16395B),
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ],
                               ),
-                            ),
-                          );
-                        },
-                      ),
+                            );
+                          }).toList(),
+                        ),
                     ],
                   ),
                 ),
@@ -1194,59 +1159,116 @@ class _Glucose24hGraphPainter extends CustomPainter {
   }
 }
 
-class _GoalProgressRingPainter extends CustomPainter {
+class _AnimatedGoalHeart extends StatefulWidget {
+  const _AnimatedGoalHeart({required this.score});
+
+  final double? score;
+
   @override
-  void paint(Canvas canvas, Size size) {
-    const double strokeWidth = 10;
-    final Rect arcRect = Rect.fromLTWH(
-      strokeWidth / 2,
-      strokeWidth / 2,
-      size.width - strokeWidth,
-      size.height - strokeWidth,
+  State<_AnimatedGoalHeart> createState() => _AnimatedGoalHeartState();
+}
+
+class _AnimatedGoalHeartState extends State<_AnimatedGoalHeart>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  double get _normalizedScore => ((widget.score ?? 0) / 100).clamp(0.0, 1.0);
+
+  void _updateAnimationProfile() {
+    final Duration duration = Duration(
+      milliseconds: (1450 - (_normalizedScore * 550)).round(),
     );
-
-    final Paint tealPaint = Paint()
-      ..color = const Color(0xFF73D4C7)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = strokeWidth
-      ..strokeCap = StrokeCap.butt;
-
-    final Paint pinkPaint = Paint()
-      ..color = const Color(0xFFE8A8A8)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = strokeWidth
-      ..strokeCap = StrokeCap.butt;
-
-    final Paint yellowPaint = Paint()
-      ..color = const Color(0xFFE8DFA8)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = strokeWidth
-      ..strokeCap = StrokeCap.butt;
-
-    final double startAngle = -math.pi / 6;
-    final double pinkSweep = math.pi / 2;
-    final double yellowSweep = math.pi / 2;
-    final double tealSweep = math.pi;
-
-    canvas.drawArc(arcRect, startAngle, pinkSweep, false, pinkPaint);
-    canvas.drawArc(
-      arcRect,
-      startAngle + pinkSweep,
-      yellowSweep,
-      false,
-      yellowPaint,
-    );
-    canvas.drawArc(
-      arcRect,
-      startAngle + pinkSweep + yellowSweep,
-      tealSweep,
-      false,
-      tealPaint,
-    );
+    _controller.duration = duration;
+    if (!_controller.isAnimating) {
+      _controller.repeat(reverse: true);
+    }
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1100),
+    );
+    _updateAnimationProfile();
+  }
+
+  @override
+  void didUpdateWidget(covariant _AnimatedGoalHeart oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.score != widget.score) {
+      _updateAnimationProfile();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final double normalizedScore = _normalizedScore;
+    final Color glowColor = Color.lerp(
+          const Color(0xFFF7B7B7),
+          const Color(0xFFEE5D6C),
+          normalizedScore,
+        ) ??
+        const Color(0xFFEE5D6C);
+
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        final double pulse = Curves.easeInOut.transform(_controller.value);
+        final double scale =
+            (0.9 + (normalizedScore * 0.05)) +
+            (pulse * (0.08 + (normalizedScore * 0.1)));
+        final double glowAlpha = 0.18 + (normalizedScore * 0.18) + (pulse * 0.12);
+        final double blurRadius = 8 + (normalizedScore * 8) + (pulse * 8);
+        final double spreadRadius = 0.5 + (normalizedScore * 1.5) + (pulse * 1.5);
+        final double heartFill = 0.2 + (normalizedScore * 0.45) + (pulse * 0.25);
+
+        return Transform.scale(
+          scale: scale,
+          child: Container(
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: RadialGradient(
+                colors: [
+                  Colors.white.withValues(alpha: 0.94),
+                  const Color(0xFFFFE8EC),
+                  const Color(0xFFF7B7B7),
+                ],
+                stops: const [0.0, 0.58, 1.0],
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: glowColor.withValues(alpha: glowAlpha.clamp(0.0, 0.55)),
+                  blurRadius: blurRadius,
+                  spreadRadius: spreadRadius,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Center(
+              child: Icon(
+                Icons.favorite_rounded,
+                size: 42,
+                color: Color.lerp(
+                      const Color(0xFFE97B8E),
+                      const Color(0xFFD83552),
+                      heartFill.clamp(0.0, 1.0),
+                    ) ??
+                    const Color(0xFFD83552),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
 }
 
 class _HomeBottomNav extends StatelessWidget {

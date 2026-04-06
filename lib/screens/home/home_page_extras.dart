@@ -567,6 +567,29 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
     }
   }
 
+  Future<void> _openAiGlucoseScanner() async {
+    if (selectedQuickType != 0 || isSavingGlucose) {
+      return;
+    }
+
+    final double? scannedValue = await Navigator.of(context).push<double>(
+      MaterialPageRoute<double>(
+        builder: (_) => const _AiGlucoseScanPage(),
+      ),
+    );
+    if (scannedValue == null || !mounted) {
+      return;
+    }
+
+    setState(() {
+      glucoseController.text = scannedValue == scannedValue.roundToDouble()
+          ? scannedValue.toStringAsFixed(0)
+          : scannedValue.toStringAsFixed(1);
+      selectedTime = TimeOfDay.now();
+      selectedQuickType = 0;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final bool isMealMode = selectedQuickType == 1;
@@ -1100,9 +1123,12 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
                     Row(
                       children: [
                         Expanded(
-                          child: _QuickActionChip(
-                            label: 'Quét AI',
-                            isSelected: true,
+                          child: GestureDetector(
+                            onTap: _openAiGlucoseScanner,
+                            child: _QuickActionChip(
+                              label: 'Quét AI',
+                              isSelected: selectedQuickType == 0,
+                            ),
                           ),
                         ),
                         const SizedBox(width: 12),
@@ -1145,6 +1171,476 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
       ),
     );
   }
+}
+
+class _AiGlucoseScanPage extends StatefulWidget {
+  const _AiGlucoseScanPage();
+
+  @override
+  State<_AiGlucoseScanPage> createState() => _AiGlucoseScanPageState();
+}
+
+class _AiGlucoseScanPageState extends State<_AiGlucoseScanPage> {
+  final BackendApiService _backendApiService = BackendApiService.instance;
+  final ImagePicker _imagePicker = ImagePicker();
+
+  bool _isProcessing = false;
+  String? _errorText;
+
+
+  Future<bool> _requestCameraAccess() async {
+    final PermissionStatus currentStatus = await Permission.camera.status;
+    if (currentStatus.isGranted) {
+      return true;
+    }
+
+    if (!mounted) {
+      return false;
+    }
+
+    final bool shouldRequest = await showDialog<bool>(
+          context: context,
+          builder: (BuildContext dialogContext) {
+            return AlertDialog(
+              title: const Text('Cho phép dùng camera'),
+              content: const Text(
+                'Ứng dụng cần quyền camera để chụp ảnh máy đo và dùng AI điền nhanh chỉ số đường huyết.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(false),
+                  child: const Text('Để sau'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(true),
+                  child: const Text('Cho phép'),
+                ),
+              ],
+            );
+          },
+        ) ??
+        false;
+    if (!shouldRequest) {
+      return false;
+    }
+
+    final PermissionStatus newStatus = await Permission.camera.request();
+    if (newStatus.isGranted) {
+      return true;
+    }
+
+    if (!mounted) {
+      return false;
+    }
+
+    if (newStatus.isPermanentlyDenied || newStatus.isRestricted) {
+      final bool openSettings = await showDialog<bool>(
+            context: context,
+            builder: (BuildContext dialogContext) {
+              return AlertDialog(
+                title: const Text('Bật quyền camera'),
+                content: const Text(
+                  'Camera đang bị chặn. Hãy mở Cài đặt ứng dụng và cho phép quyền camera.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(false),
+                    child: const Text('Hủy'),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(true),
+                    child: const Text('Mở cài đặt'),
+                  ),
+                ],
+              );
+            },
+          ) ??
+          false;
+      if (openSettings) {
+        await openAppSettings();
+      }
+    }
+
+    return false;
+  }
+
+  double? _extractGlucoseValue(AiChatResultData result) {
+    double? parseNumber(dynamic value) {
+      final String text = (value ?? '').toString().trim().replaceAll(',', '.');
+      if (text.isEmpty) {
+        return null;
+      }
+      final double? parsed = double.tryParse(text);
+      if (parsed == null || parsed < 20 || parsed > 600) {
+        return null;
+      }
+      return parsed;
+    }
+
+    final List<dynamic> candidates = <dynamic>[
+      result.rawData['glucoseValue'],
+      result.rawData['value'],
+      result.rawData['reading'],
+      result.rawData['detectedValue'],
+      result.reply,
+      result.rawData['message'],
+      result.rawData['content'],
+    ];
+
+    final dynamic extractedData = result.rawData['extractedData'];
+    if (extractedData is Map<String, dynamic>) {
+      candidates.addAll(<dynamic>[
+        extractedData['glucoseValue'],
+        extractedData['value'],
+        extractedData['reading'],
+      ]);
+    }
+
+    for (final dynamic candidate in candidates) {
+      final double? direct = parseNumber(candidate);
+      if (direct != null) {
+        return direct;
+      }
+
+      final String text = (candidate ?? '').toString();
+      final Iterable<RegExpMatch> matches = RegExp(
+        r'(?<!\d)(\d{2,3}(?:[.,]\d)?)(?!\d)',
+      ).allMatches(text);
+      for (final RegExpMatch match in matches) {
+        final double? parsed = parseNumber(match.group(1));
+        if (parsed != null) {
+          return parsed;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  Future<void> _captureAndAnalyze() async {
+    if (_isProcessing) {
+      return;
+    }
+
+    setState(() {
+      _isProcessing = true;
+      _errorText = null;
+    });
+
+    try {
+      final bool hasAccess = await _requestCameraAccess();
+      if (!hasAccess) {
+        if (mounted) {
+          setState(() {
+            _isProcessing = false;
+          });
+        }
+        return;
+      }
+
+      final XFile? file = await _imagePicker.pickImage(
+        source: ImageSource.camera,
+        imageQuality: 92,
+        preferredCameraDevice: CameraDevice.rear,
+      );
+      if (file == null) {
+        if (mounted) {
+          setState(() {
+            _isProcessing = false;
+          });
+        }
+        return;
+      }
+
+      final AiChatResultData result = await _backendApiService.sendAiChatMessage(
+        message:
+            'Hãy đọc chỉ số đường huyết từ ảnh máy đo. Chỉ trả về một giá trị số glucose mg/dL rõ ràng. Nếu không đọc được, trả về UNKNOWN.',
+        file: File(file.path),
+      );
+      final double? glucoseValue = _extractGlucoseValue(result);
+      if (!mounted) {
+        return;
+      }
+
+      if (glucoseValue == null) {
+        setState(() {
+          _isProcessing = false;
+          _errorText =
+              'AI chưa đọc được chỉ số đường huyết từ ảnh này. Hãy chụp rõ màn hình máy đo hơn.';
+        });
+        return;
+      }
+
+      Navigator.of(context).pop(glucoseValue);
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isProcessing = false;
+        _errorText =
+            'Không thể quét ảnh lúc này. Hãy thử lại với ảnh rõ hơn.';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF0A1934),
+      body: SafeArea(
+        child: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [Color(0xFF17324F), Color(0xFF091935)],
+            ),
+          ),
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                child: Row(
+                  children: [
+                    IconButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      icon: const Icon(
+                        Icons.chevron_left,
+                        color: Colors.white,
+                        size: 30,
+                      ),
+                    ),
+                    const Expanded(
+                      child: Text(
+                        'Chụp ảnh',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 24,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 48),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 12, 24, 12),
+                  child: Column(
+                    children: [
+                      Expanded(
+                        child: Center(
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(
+                              maxWidth: 320,
+                              maxHeight: 420,
+                            ),
+                            child: AspectRatio(
+                              aspectRatio: 0.82,
+                              child: Stack(
+                                children: [
+                                  Positioned.fill(
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        color: Colors.white.withValues(alpha: 0.05),
+                                        borderRadius: BorderRadius.circular(24),
+                                        border: Border.all(
+                                          color: Colors.white.withValues(alpha: 0.08),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  Positioned.fill(
+                                    child: CustomPaint(
+                                      painter: const _AiScanFramePainter(),
+                                    ),
+                                  ),
+                                  const Align(
+                                    alignment: Alignment.center,
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          Icons.photo_camera_outlined,
+                                          color: Color(0x886BD7FF),
+                                          size: 56,
+                                        ),
+                                        SizedBox(height: 12),
+                                        Text(
+                                          'Đưa máy đo vào khung\nrồi nhấn chụp hình',
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(
+                                            color: Color(0xCCFFFFFF),
+                                            fontSize: 17,
+                                            fontWeight: FontWeight.w700,
+                                            height: 1.25,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+                        decoration: BoxDecoration(
+                          color: const Color(0xAA6A4E54),
+                          borderRadius: BorderRadius.circular(18),
+                        ),
+                        child: Row(
+                          children: [
+                            const _SafeAssetImage(
+                              path: 'assets/images/homepage/Mascot Talk 3 1.png',
+                              width: 80,
+                              height: 80,
+                            ),
+                            const SizedBox(width: 10),
+                            const Expanded(
+                              child: Text(
+                                'NHẤN CHỤP HÌNH ĐỂ MỞ CAMERA\nVÀ GỬI ẢNH MÁY ĐO CHO AI',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w800,
+                                  height: 1.2,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (_errorText != null) ...[
+                        const SizedBox(height: 12),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 10,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xEED74D63),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Text(
+                            _errorText!,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 18),
+                      const Text(
+                        'Chụp hình',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      GestureDetector(
+                        onTap: _captureAndAnalyze,
+                        child: Container(
+                          width: 88,
+                          height: 88,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: const Color(0xFF2B7BFF),
+                              width: 7,
+                            ),
+                            boxShadow: const [
+                              BoxShadow(
+                                color: Color(0x66000000),
+                                blurRadius: 18,
+                                offset: Offset(0, 6),
+                              ),
+                            ],
+                          ),
+                          child: Center(
+                            child: Container(
+                              width: 54,
+                              height: 54,
+                              decoration: BoxDecoration(
+                                color: _isProcessing
+                                    ? const Color(0xFF17324F)
+                                    : Colors.black,
+                                shape: BoxShape.circle,
+                              ),
+                              child: _isProcessing
+                                  ? const Padding(
+                                      padding: EdgeInsets.all(14),
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        valueColor: AlwaysStoppedAnimation<Color>(
+                                          Colors.white,
+                                        ),
+                                      ),
+                                    )
+                                  : null,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AiScanFramePainter extends CustomPainter {
+  const _AiScanFramePainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint paint = Paint()
+      ..color = const Color(0xFF6BD7FF)
+      ..strokeWidth = 8
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+
+    const double cornerLength = 42;
+    const double inset = 10;
+
+    final Path path = Path()
+      ..moveTo(inset + cornerLength, inset)
+      ..lineTo(inset, inset)
+      ..lineTo(inset, inset + cornerLength)
+      ..moveTo(size.width - inset - cornerLength, inset)
+      ..lineTo(size.width - inset, inset)
+      ..lineTo(size.width - inset, inset + cornerLength)
+      ..moveTo(inset, size.height - inset - cornerLength)
+      ..lineTo(inset, size.height - inset)
+      ..lineTo(inset + cornerLength, size.height - inset)
+      ..moveTo(size.width - inset - cornerLength, size.height - inset)
+      ..lineTo(size.width - inset, size.height - inset)
+      ..lineTo(size.width - inset, size.height - inset - cornerLength);
+
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class _QuickActionChip extends StatelessWidget {
@@ -1207,37 +1703,672 @@ class _AiAssistantTab extends StatefulWidget {
 
 class _AiAssistantTabState extends State<_AiAssistantTab> {
   final TextEditingController _messageController = TextEditingController();
+  final BackendApiService _backendApiService = BackendApiService.instance;
+  final ScrollController _messagesScrollController = ScrollController();
   final List<_AiMessage> _messages = <_AiMessage>[];
+  final List<AiChatSessionSummaryData> _sessions = <AiChatSessionSummaryData>[];
+  final ImagePicker _imagePicker = ImagePicker();
+  final AudioRecorder _audioRecorder = AudioRecorder();
+
+  File? _selectedFile;
+  String? _selectedFileName;
+  String? _sessionId;
+  bool _isSending = false;
+  bool _isRecording = false;
+  bool _isLoadingSessions = true;
+  bool _isLoadingSessionMessages = false;
+  bool _isManagingSession = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadSessions());
+  }
 
   @override
   void dispose() {
     _messageController.dispose();
+    _messagesScrollController.dispose();
+    unawaited(_audioRecorder.dispose());
     super.dispose();
   }
 
-  void _sendMessage() {
-    final String text = _messageController.text.trim();
-    if (text.isEmpty) {
+  Future<void> _loadSessions({bool autoOpenLatest = true}) async {
+    final List<AiChatSessionSummaryData> sessions =
+        await _backendApiService.fetchAiSessions();
+    if (!mounted) {
       return;
     }
 
     setState(() {
-      _messages.add(_AiMessage(text: text, isUser: true));
+      _sessions
+        ..clear()
+        ..addAll(sessions);
+      _isLoadingSessions = false;
+    });
+
+    if (!autoOpenLatest) {
+      return;
+    }
+
+    if (_sessionId != null &&
+        sessions.any((AiChatSessionSummaryData item) => item.id == _sessionId)) {
+      return;
+    }
+
+    if (sessions.isNotEmpty) {
+      await _selectSession(sessions.first.id);
+    }
+  }
+
+  Future<void> _refreshSessionSummaries() async {
+    final List<AiChatSessionSummaryData> sessions =
+        await _backendApiService.fetchAiSessions();
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _sessions
+        ..clear()
+        ..addAll(sessions);
+    });
+  }
+
+  String _deriveSessionTitle(String source) {
+    final String singleLine = source
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (singleLine.isEmpty) {
+      return 'Cuộc trò chuyện mới';
+    }
+    if (singleLine.length <= 32) {
+      return singleLine;
+    }
+    return '${singleLine.substring(0, 32).trimRight()}...';
+  }
+
+  bool _isGenericSessionTitle(String title) {
+    final String normalized = title.trim().toLowerCase();
+    return normalized.isEmpty ||
+        normalized == 'cuộc trò chuyện' ||
+        normalized == 'cuoc tro chuyen' ||
+        normalized == 'cuộc trò chuyện mới' ||
+        normalized == 'new chat';
+  }
+
+  void _upsertSessionLocally({
+    required String sessionId,
+    required String title,
+  }) {
+    final int existingIndex = _sessions.indexWhere(
+      (AiChatSessionSummaryData item) => item.id == sessionId,
+    );
+    final AiChatSessionSummaryData summary = AiChatSessionSummaryData(
+      id: sessionId,
+      title: title,
+      updatedAt: DateTime.now(),
+    );
+
+    setState(() {
+      if (existingIndex >= 0) {
+        _sessions[existingIndex] = summary;
+      } else {
+        _sessions.insert(0, summary);
+      }
+    });
+  }
+
+  Future<void> _showRenameSessionDialog(AiChatSessionSummaryData session) async {
+    if (_isManagingSession || _isSending || _isRecording) {
+      return;
+    }
+
+    final TextEditingController controller = TextEditingController(
+      text: session.title,
+    );
+    final String? renamed = await showDialog<String>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          title: const Text('Đổi tên cuộc trò chuyện'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            maxLength: 255,
+            decoration: const InputDecoration(
+              hintText: 'Nhập tên cuộc trò chuyện',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Hủy'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(controller.text),
+              child: const Text('Lưu'),
+            ),
+          ],
+        );
+      },
+    );
+    controller.dispose();
+
+    if (renamed == null) {
+      return;
+    }
+
+    final String trimmedTitle = renamed.trim();
+    if (trimmedTitle.isEmpty || trimmedTitle == session.title) {
+      return;
+    }
+
+    setState(() {
+      _isManagingSession = true;
+    });
+
+    try {
+      await _backendApiService.renameAiSession(session.id, trimmedTitle);
+      if (!mounted) {
+        return;
+      }
+
+      final int index = _sessions.indexWhere(
+        (AiChatSessionSummaryData item) => item.id == session.id,
+      );
+      if (index >= 0) {
+        setState(() {
+          _sessions[index] = AiChatSessionSummaryData(
+            id: session.id,
+            title: trimmedTitle,
+            updatedAt: DateTime.now(),
+            preview: session.preview,
+          );
+        });
+      }
+    } catch (error) {
+      _appendErrorMessage(error.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isManagingSession = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _deleteSession(AiChatSessionSummaryData session) async {
+    if (_isManagingSession || _isSending || _isRecording) {
+      return;
+    }
+
+    final bool confirmed = await showDialog<bool>(
+          context: context,
+          builder: (BuildContext dialogContext) {
+            return AlertDialog(
+              title: const Text('Xóa cuộc trò chuyện'),
+              content: Text('Xóa "${session.title}"?'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(false),
+                  child: const Text('Hủy'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(true),
+                  child: const Text('Xóa'),
+                ),
+              ],
+            );
+          },
+        ) ??
+        false;
+    if (!confirmed) {
+      return;
+    }
+
+    setState(() {
+      _isManagingSession = true;
+    });
+
+    try {
+      await _backendApiService.deleteAiSession(session.id);
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _sessions.removeWhere((AiChatSessionSummaryData item) => item.id == session.id);
+        if (_sessionId == session.id) {
+          _sessionId = null;
+          _messages.clear();
+          _selectedFile = null;
+          _selectedFileName = null;
+        }
+      });
+
+      if (_sessionId == null && _sessions.isNotEmpty) {
+        await _selectSession(_sessions.first.id);
+      }
+    } catch (error) {
+      _appendErrorMessage(error.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isManagingSession = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _selectSession(String sessionId) async {
+    if (_isSending || _isRecording) {
+      return;
+    }
+
+    setState(() {
+      _sessionId = sessionId;
+      _isLoadingSessionMessages = true;
+      _selectedFile = null;
+      _selectedFileName = null;
+      _messages.clear();
+    });
+
+    final List<AiChatMessageData> history = await _backendApiService
+        .fetchAiSessionMessages(sessionId);
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _messages
+        ..clear()
+        ..addAll(
+          history.map(
+            (AiChatMessageData item) => _AiMessage(
+              text: item.text,
+              isUser: item.isUser,
+              attachmentName: item.attachmentName,
+              disclaimer: item.disclaimer,
+            ),
+          ),
+        );
+      _isLoadingSessionMessages = false;
+    });
+    _scrollToBottom();
+  }
+
+  void _startNewChat() {
+    if (_isSending || _isRecording) {
+      return;
+    }
+
+    setState(() {
+      _sessionId = null;
+      _selectedFile = null;
+      _selectedFileName = null;
+      _messages.clear();
+      _isLoadingSessionMessages = false;
+    });
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_messagesScrollController.hasClients) {
+        return;
+      }
+
+      _messagesScrollController.animateTo(
+        _messagesScrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  void _appendErrorMessage(String message) {
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
       _messages.add(
-        const _AiMessage(
-          text:
-              'Cảm ơn bạn đã chia sẻ. Mình gợi ý theo dõi thêm sau bữa ăn 2 giờ và chọn bữa tiếp theo ít đường hơn nhé.',
+        _AiMessage(
+          text: message,
           isUser: false,
+          isError: true,
         ),
       );
     });
+    _scrollToBottom();
+  }
 
-    _messageController.clear();
+  String _fileNameFromPath(String path) {
+    final List<String> segments = path.split(RegExp(r'[\\/]'));
+    return segments.isEmpty ? path : segments.last;
+  }
+
+  Future<void> _pickAttachment() async {
+    final FilePickerResult? result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const <String>['jpg', 'jpeg', 'png', 'mp3', 'wav', 'm4a'],
+      withData: false,
+    );
+    if (result == null || result.files.isEmpty) {
+      return;
+    }
+
+    final PlatformFile file = result.files.first;
+    final String? path = file.path;
+    if (path == null || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _selectedFile = File(path);
+      _selectedFileName = file.name;
+    });
+  }
+
+  Future<bool> _requestCameraAccess() async {
+    final PermissionStatus currentStatus = await Permission.camera.status;
+    if (currentStatus.isGranted) {
+      return true;
+    }
+
+    if (!mounted) {
+      return false;
+    }
+
+    final bool shouldRequest = await showDialog<bool>(
+          context: context,
+          builder: (BuildContext dialogContext) {
+            return AlertDialog(
+              title: const Text('Cho phép dùng camera'),
+              content: const Text(
+                'Ứng dụng cần quyền camera để chụp ảnh và tự động đính kèm vào đoạn chat AI.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(false),
+                  child: const Text('Để sau'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(true),
+                  child: const Text('Cho phép'),
+                ),
+              ],
+            );
+          },
+        ) ??
+        false;
+    if (!shouldRequest) {
+      return false;
+    }
+
+    final PermissionStatus newStatus = await Permission.camera.request();
+    if (newStatus.isGranted) {
+      return true;
+    }
+
+    if (!mounted) {
+      return false;
+    }
+
+    if (newStatus.isPermanentlyDenied || newStatus.isRestricted) {
+      final bool openSettings = await showDialog<bool>(
+            context: context,
+            builder: (BuildContext dialogContext) {
+              return AlertDialog(
+                title: const Text('Bật quyền camera'),
+                content: const Text(
+                  'Camera đang bị chặn. Hãy mở Cài đặt ứng dụng và cho phép quyền camera.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(false),
+                    child: const Text('Hủy'),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(true),
+                    child: const Text('Mở cài đặt'),
+                  ),
+                ],
+              );
+            },
+          ) ??
+          false;
+      if (openSettings) {
+        await openAppSettings();
+      }
+    }
+
+    return false;
+  }
+
+  Future<void> _captureImage() async {
+    try {
+      final bool hasAccess = await _requestCameraAccess();
+      if (!hasAccess) {
+        return;
+      }
+
+      final XFile? image = await _imagePicker.pickImage(
+        source: ImageSource.camera,
+        imageQuality: 85,
+      );
+      if (image == null || !mounted) {
+        return;
+      }
+
+      setState(() {
+        _selectedFile = File(image.path);
+        _selectedFileName = image.name;
+      });
+    } catch (_) {
+      _appendErrorMessage(
+        'Không thể mở camera. Hãy kiểm tra quyền camera hoặc khởi động lại ứng dụng.',
+      );
+    }
+  }
+
+  void _clearSelectedFile() {
+    setState(() {
+      _selectedFile = null;
+      _selectedFileName = null;
+    });
+  }
+
+  Future<void> _toggleRecording() async {
+    if (_isSending) {
+      return;
+    }
+
+    if (_isRecording) {
+      await _stopRecordingAndSend();
+      return;
+    }
+
+    await _startRecording();
+  }
+
+  Future<void> _startRecording() async {
+    try {
+      final bool hasPermission = await _audioRecorder.hasPermission();
+      if (!hasPermission) {
+        _appendErrorMessage('Chưa được cấp quyền microphone để ghi âm.');
+        return;
+      }
+
+      final Directory directory = await getTemporaryDirectory();
+      final String filePath =
+          '${directory.path}${Platform.pathSeparator}ai_audio_${DateTime.now().millisecondsSinceEpoch}.m4a';
+
+      await _audioRecorder.start(
+        const RecordConfig(
+          encoder: AudioEncoder.aacLc,
+          bitRate: 128000,
+          sampleRate: 44100,
+        ),
+        path: filePath,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isRecording = true;
+      });
+    } catch (_) {
+      _appendErrorMessage('Không thể bắt đầu ghi âm lúc này.');
+    }
+  }
+
+  Future<void> _stopRecordingAndSend() async {
+    try {
+      final String? path = await _audioRecorder.stop();
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isRecording = false;
+      });
+
+      if (path == null || path.isEmpty) {
+        _appendErrorMessage('Không thể lưu file ghi âm.');
+        return;
+      }
+
+      final File audioFile = File(path);
+      if (!audioFile.existsSync()) {
+        _appendErrorMessage('Không tìm thấy file ghi âm vừa tạo.');
+        return;
+      }
+
+      setState(() {
+        _selectedFile = audioFile;
+        _selectedFileName = _fileNameFromPath(path);
+      });
+      await _sendMessage();
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isRecording = false;
+        });
+      }
+      _appendErrorMessage('Không thể kết thúc ghi âm.');
+    }
+  }
+
+  Future<void> _sendMessage() async {
+    final String text = _messageController.text.trim();
+    final File? file = _selectedFile;
+    if (text.isEmpty && file == null) {
+      return;
+    }
+    if (_isSending) {
+      return;
+    }
+
+    final String? attachmentName = _selectedFileName;
+    final String? currentSessionId = _sessionId;
+    final String localDraftTitle = _deriveSessionTitle(
+      text.isNotEmpty ? text : (attachmentName ?? 'Cuộc trò chuyện mới'),
+    );
+
+    setState(() {
+      _messages.add(
+        _AiMessage(
+          text: text,
+          isUser: true,
+          attachmentName: attachmentName,
+        ),
+      );
+      _isSending = true;
+    });
+    _scrollToBottom();
+
+    setState(() {
+      _messageController.clear();
+      _selectedFile = null;
+      _selectedFileName = null;
+    });
+
+    try {
+      final AiChatResultData result = await _backendApiService.sendAiChatMessage(
+        message: text.isEmpty ? null : text,
+        sessionId: _sessionId,
+        file: file,
+      );
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _sessionId = result.sessionId ?? _sessionId;
+        _messages.add(
+          _AiMessage(
+            text: result.reply,
+            isUser: false,
+            disclaimer: (result.rawData['medicalDisclaimer'] ??
+                    result.rawData['disclaimer'])
+                ?.toString(),
+          ),
+        );
+
+        final String? effectiveSessionId = result.sessionId ?? _sessionId;
+        if (effectiveSessionId != null) {
+          final int existingIndex = _sessions.indexWhere(
+            (AiChatSessionSummaryData item) => item.id == effectiveSessionId,
+          );
+          final String serverOrFallbackTitle =
+              existingIndex >= 0 && !_isGenericSessionTitle(_sessions[existingIndex].title)
+              ? _sessions[existingIndex].title
+              : localDraftTitle;
+          if (existingIndex >= 0) {
+            _sessions.removeAt(existingIndex);
+          }
+          _sessions.insert(
+            0,
+            AiChatSessionSummaryData(
+              id: effectiveSessionId,
+              title: serverOrFallbackTitle,
+              updatedAt: DateTime.now(),
+              preview: result.reply,
+            ),
+          );
+        }
+      });
+      _scrollToBottom();
+      unawaited(_refreshSessionSummaries());
+
+      if (currentSessionId == null && result.sessionId != null) {
+        setState(() {
+          _sessionId = result.sessionId;
+        });
+        _upsertSessionLocally(
+          sessionId: result.sessionId!,
+          title: localDraftTitle,
+        );
+      }
+    } catch (error) {
+      _appendErrorMessage(error.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+        });
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final bool hasMessages = _messages.isNotEmpty;
+    final bool showEmptyState =
+        !_isLoadingSessionMessages && !_isLoadingSessions && !hasMessages;
 
     return Container(
       color: Colors.white,
@@ -1279,12 +2410,165 @@ class _AiAssistantTabState extends State<_AiAssistantTab> {
               ],
             ),
           ),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+            decoration: const BoxDecoration(
+              color: Color(0xFFE8F4FB),
+              border: Border(
+                bottom: BorderSide(color: Color(0xFFCAE4F2)),
+              ),
+            ),
+            child: Row(
+              children: [
+                GestureDetector(
+                  onTap: _startNewChat,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: _sessionId == null
+                          ? const Color(0xFF1564A6)
+                          : Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFFB5D9EB)),
+                    ),
+                    child: Text(
+                      'Mới',
+                      style: TextStyle(
+                        color: _sessionId == null
+                            ? Colors.white
+                            : const Color(0xFF29506F),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: SizedBox(
+                    height: 38,
+                    child: _isLoadingSessions
+                        ? const Align(
+                            alignment: Alignment.centerLeft,
+                            child: SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          )
+                        : ListView.separated(
+                            scrollDirection: Axis.horizontal,
+                            itemCount: _sessions.length,
+                            separatorBuilder: (_, __) => const SizedBox(width: 8),
+                            itemBuilder: (context, index) {
+                              final AiChatSessionSummaryData session =
+                                  _sessions[index];
+                              return Container(
+                                decoration: BoxDecoration(
+                                  color: session.id == _sessionId
+                                      ? const Color(0xFF1564A6)
+                                      : Colors.white,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(
+                                    color: const Color(0xFFB5D9EB),
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    InkWell(
+                                      borderRadius: const BorderRadius.only(
+                                        topLeft: Radius.circular(12),
+                                        bottomLeft: Radius.circular(12),
+                                      ),
+                                      onTap: () => _selectSession(session.id),
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 12,
+                                          vertical: 8,
+                                        ),
+                                        child: ConstrainedBox(
+                                          constraints: const BoxConstraints(
+                                            maxWidth: 140,
+                                          ),
+                                          child: Text(
+                                            session.title,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              color: session.id == _sessionId
+                                                  ? Colors.white
+                                                  : const Color(0xFF29506F),
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.w700,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    PopupMenuButton<String>(
+                                      enabled: !_isManagingSession &&
+                                          !_isSending &&
+                                          !_isRecording,
+                                      padding: EdgeInsets.zero,
+                                      color: Colors.white,
+                                      icon: Icon(
+                                        Icons.more_horiz_rounded,
+                                        size: 18,
+                                        color: session.id == _sessionId
+                                            ? Colors.white
+                                            : const Color(0xFF29506F),
+                                      ),
+                                      onSelected: (String value) async {
+                                        if (value == 'rename') {
+                                          await _showRenameSessionDialog(session);
+                                          return;
+                                        }
+                                        if (value == 'delete') {
+                                          await _deleteSession(session);
+                                        }
+                                      },
+                                      itemBuilder: (BuildContext context) =>
+                                          const <PopupMenuEntry<String>>[
+                                            PopupMenuItem<String>(
+                                              value: 'rename',
+                                              child: Text('Đổi tên'),
+                                            ),
+                                            PopupMenuItem<String>(
+                                              value: 'delete',
+                                              child: Text('Xóa'),
+                                            ),
+                                          ],
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                ),
+              ],
+            ),
+          ),
           Expanded(
             child: Stack(
               children: [
                 Positioned.fill(
-                  child: hasMessages
+                  child: _isLoadingSessionMessages
+                      ? const Center(
+                          child: CircularProgressIndicator(
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              Color(0xFF1564A6),
+                            ),
+                          ),
+                        )
+                      : hasMessages
                       ? ListView.builder(
+                          controller: _messagesScrollController,
                           padding: const EdgeInsets.fromLTRB(10, 12, 10, 128),
                           itemCount: _messages.length,
                           itemBuilder: (context, index) {
@@ -1313,7 +2597,10 @@ class _AiAssistantTabState extends State<_AiAssistantTab> {
                                     ],
                                   ),
                                   child: Text(
-                                    message.text,
+                                    message.attachmentName == null ||
+                                            message.attachmentName!.isEmpty
+                                        ? message.text
+                                        : '${message.text.isEmpty ? 'Đã gửi tệp đính kèm' : message.text}\n\nTệp: ${message.attachmentName}',
                                     style: const TextStyle(
                                       color: Color(0xFF355B75),
                                       fontSize: 12,
@@ -1337,7 +2624,9 @@ class _AiAssistantTabState extends State<_AiAssistantTab> {
                                   maxWidth: 300,
                                 ),
                                 decoration: BoxDecoration(
-                                  color: const Color(0xFF9ED0E8),
+                                  color: message.isError
+                                      ? const Color(0xFFF5C6CF)
+                                      : const Color(0xFF9ED0E8),
                                   borderRadius: BorderRadius.circular(10),
                                   boxShadow: const [
                                     BoxShadow(
@@ -1358,14 +2647,35 @@ class _AiAssistantTabState extends State<_AiAssistantTab> {
                                     ),
                                     const SizedBox(width: 6),
                                     Expanded(
-                                      child: Text(
-                                        message.text,
-                                        style: const TextStyle(
-                                          color: Color(0xFF22465F),
-                                          fontSize: 12,
-                                          height: 1.35,
-                                          fontWeight: FontWeight.w500,
-                                        ),
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            message.text,
+                                            style: TextStyle(
+                                              color: message.isError
+                                                  ? const Color(0xFF7A2736)
+                                                  : const Color(0xFF22465F),
+                                              fontSize: 12,
+                                              height: 1.35,
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          ),
+                                          if (message.disclaimer != null &&
+                                              message.disclaimer!.trim().isNotEmpty) ...[
+                                            const SizedBox(height: 6),
+                                            Text(
+                                              message.disclaimer!,
+                                              style: const TextStyle(
+                                                color: Color(0xFF53758B),
+                                                fontSize: 10,
+                                                height: 1.35,
+                                                fontStyle: FontStyle.italic,
+                                              ),
+                                            ),
+                                          ],
+                                        ],
                                       ),
                                     ),
                                   ],
@@ -1374,7 +2684,8 @@ class _AiAssistantTabState extends State<_AiAssistantTab> {
                             );
                           },
                         )
-                      : Column(
+                      : showEmptyState
+                      ? Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             const Text(
@@ -1394,7 +2705,8 @@ class _AiAssistantTabState extends State<_AiAssistantTab> {
                               height: 110,
                             ),
                           ],
-                        ),
+                        )
+                      : const SizedBox.shrink(),
                 ),
                 Positioned(
                   left: 10,
@@ -1432,6 +2744,7 @@ class _AiAssistantTabState extends State<_AiAssistantTab> {
                                     Expanded(
                                       child: TextField(
                                         controller: _messageController,
+                                        enabled: !_isRecording,
                                         textInputAction: TextInputAction.send,
                                         onSubmitted: (_) => _sendMessage(),
                                         decoration: const InputDecoration(
@@ -1452,7 +2765,7 @@ class _AiAssistantTabState extends State<_AiAssistantTab> {
                                       ),
                                     ),
                                     GestureDetector(
-                                      onTap: _sendMessage,
+                                      onTap: _isSending ? null : _sendMessage,
                                       child: Container(
                                         width: 24,
                                         height: 24,
@@ -1473,78 +2786,186 @@ class _AiAssistantTabState extends State<_AiAssistantTab> {
                             ),
                           ],
                         ),
+                        if (_isRecording) ...[
+                          const SizedBox(height: 6),
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 7,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFFE0E4),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Row(
+                              children: [
+                                Icon(
+                                  Icons.fiber_manual_record_rounded,
+                                  color: Color(0xFFD9405C),
+                                  size: 14,
+                                ),
+                                SizedBox(width: 6),
+                                Text(
+                                  'Đang ghi âm, chạm mic lần nữa để gửi',
+                                  style: TextStyle(
+                                    color: Color(0xFF8E3143),
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                        if (_selectedFileName != null) ...[
+                          const SizedBox(height: 6),
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFD6E8F1),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(
+                                  Icons.insert_drive_file_outlined,
+                                  color: Color(0xFF5F7E95),
+                                  size: 14,
+                                ),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: Text(
+                                    _selectedFileName!,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: Color(0xFF355B75),
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                                GestureDetector(
+                                  onTap: _clearSelectedFile,
+                                  child: const Icon(
+                                    Icons.close_rounded,
+                                    color: Color(0xFF6A8CA4),
+                                    size: 16,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                         const SizedBox(height: 6),
                         Row(
                           children: [
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 4,
-                              ),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFD6E8F1),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: const Row(
-                                children: [
-                                  Icon(
-                                    Icons.attach_file_rounded,
-                                    color: Color(0xFF6A8CA4),
-                                    size: 10,
-                                  ),
-                                  SizedBox(width: 2),
-                                  Text(
-                                    'Đính kèm',
-                                    style: TextStyle(
+                            GestureDetector(
+                              onTap: (_isSending || _isRecording)
+                                  ? null
+                                  : _pickAttachment,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFD6E8F1),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: const Row(
+                                  children: [
+                                    Icon(
+                                      Icons.attach_file_rounded,
                                       color: Color(0xFF6A8CA4),
-                                      fontSize: 9,
-                                      fontWeight: FontWeight.w600,
+                                      size: 10,
                                     ),
-                                  ),
-                                ],
+                                    SizedBox(width: 2),
+                                    Text(
+                                      'Đính kèm',
+                                      style: TextStyle(
+                                        color: Color(0xFF6A8CA4),
+                                        fontSize: 9,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                             const SizedBox(width: 6),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 4,
-                              ),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFD6E8F1),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: const Row(
-                                children: [
-                                  Icon(
-                                    Icons.photo_camera_outlined,
-                                    color: Color(0xFF6A8CA4),
-                                    size: 10,
-                                  ),
-                                  SizedBox(width: 2),
-                                  Text(
-                                    'Chụp ảnh',
-                                    style: TextStyle(
+                            GestureDetector(
+                              onTap: (_isSending || _isRecording)
+                                  ? null
+                                  : _captureImage,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFD6E8F1),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: const Row(
+                                  children: [
+                                    Icon(
+                                      Icons.photo_camera_outlined,
                                       color: Color(0xFF6A8CA4),
-                                      fontSize: 9,
-                                      fontWeight: FontWeight.w600,
+                                      size: 10,
                                     ),
-                                  ),
-                                ],
+                                    SizedBox(width: 2),
+                                    Text(
+                                      'Chụp ảnh',
+                                      style: TextStyle(
+                                        color: Color(0xFF6A8CA4),
+                                        fontSize: 9,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                             const Spacer(),
-                            Container(
-                              width: 28,
-                              height: 22,
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFD6E8F1),
-                                borderRadius: BorderRadius.circular(7),
-                              ),
-                              child: const Icon(
-                                Icons.mic,
-                                color: Color(0xFF4C7A9B),
-                                size: 14,
+                            GestureDetector(
+                              onTap: _toggleRecording,
+                              child: AnimatedContainer(
+                                duration: const Duration(milliseconds: 180),
+                                width: 28,
+                                height: 22,
+                                decoration: BoxDecoration(
+                                  color: _isRecording
+                                      ? const Color(0xFFFFD5DC)
+                                      : const Color(0xFFD6E8F1),
+                                  borderRadius: BorderRadius.circular(7),
+                                ),
+                                child: _isSending
+                                    ? const SizedBox(
+                                        width: 12,
+                                        height: 12,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 1.8,
+                                          valueColor:
+                                              AlwaysStoppedAnimation<Color>(
+                                            Color(0xFF4C7A9B),
+                                          ),
+                                        ),
+                                      )
+                                    : Icon(
+                                        _isRecording
+                                            ? Icons.stop_rounded
+                                            : Icons.mic,
+                                        color: _isRecording
+                                            ? const Color(0xFFD9405C)
+                                            : const Color(0xFF4C7A9B),
+                                        size: 14,
+                                      ),
                               ),
                             ),
                           ],
@@ -1563,10 +2984,19 @@ class _AiAssistantTabState extends State<_AiAssistantTab> {
 }
 
 class _AiMessage {
-  const _AiMessage({required this.text, required this.isUser});
+  const _AiMessage({
+    required this.text,
+    required this.isUser,
+    this.attachmentName,
+    this.disclaimer,
+    this.isError = false,
+  });
 
   final String text;
   final bool isUser;
+  final String? attachmentName;
+  final String? disclaimer;
+  final bool isError;
 }
 
 class _DiaryTab extends StatefulWidget {

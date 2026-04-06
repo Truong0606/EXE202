@@ -45,5 +45,11 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Ứng dụng cần quyền microphone để ghi âm và gửi câu hỏi cho AI.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Ứng dụng cần quyền camera để chụp ảnh gửi cho AI.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Ứng dụng cần quyền thư viện ảnh để chọn ảnh gửi cho AI.</string>
 </dict>
 </plist>
