@@ -32,11 +32,53 @@ class _RegisterPageState extends State<RegisterPage> {
   bool isValidPassword = false;
   bool isPasswordVisible = false;
   bool isSubmitting = false;
+  bool showValidationErrors = false;
+  String? submitErrorMessage;
 
   final TextEditingController phoneController = TextEditingController();
   final TextEditingController passwordController = TextEditingController();
 
   int get _minPasswordLength => widget.continueToProfileSetup ? 8 : 6;
+
+  String? get _phoneError {
+    if (!showValidationErrors) {
+      return null;
+    }
+
+    final String input = phoneController.text.trim();
+    if (input.isEmpty) {
+      return 'Vui lòng nhập số điện thoại';
+    }
+    if (!_isPhoneValid(input)) {
+      return 'Số điện thoại không hợp lệ';
+    }
+    return null;
+  }
+
+  String? get _passwordError {
+    if (!showValidationErrors || !isPasswordStep) {
+      return null;
+    }
+
+    final String password = passwordController.text.trim();
+    if (password.isEmpty) {
+      return 'Vui lòng nhập mật khẩu';
+    }
+    if (password.length < _minPasswordLength) {
+      return 'Mật khẩu phải có ít nhất $_minPasswordLength ký tự';
+    }
+    return null;
+  }
+
+  String? get _termsError {
+    if (!widget.continueToProfileSetup || !showValidationErrors) {
+      return null;
+    }
+    if (!acceptedTerms) {
+      return 'Bạn cần đồng ý điều khoản để tiếp tục';
+    }
+    return null;
+  }
 
   @override
   void dispose() {
@@ -79,26 +121,33 @@ class _RegisterPageState extends State<RegisterPage> {
 
   Future<void> _onContinuePressed() async {
     if (!isPasswordStep) {
-      if (!isValidPhone) {
+      setState(() {
+        showValidationErrors = true;
+        submitErrorMessage = null;
+      });
+
+      if (_phoneError != null || _termsError != null) {
         return;
       }
+
       setState(() {
         isPasswordStep = true;
-        acceptedTerms = true;
+        showValidationErrors = false;
       });
       return;
     }
 
-    if (!isValidPassword || isSubmitting) {
+    setState(() {
+      showValidationErrors = true;
+      submitErrorMessage = null;
+    });
+
+    if (_passwordError != null || isSubmitting) {
       return;
     }
 
     final String phone = _toLocalPhone(phoneController.text.trim());
     final String password = passwordController.text.trim();
-
-    if (password.length < _minPasswordLength) {
-      return;
-    }
 
     setState(() {
       isSubmitting = true;
@@ -136,10 +185,13 @@ class _RegisterPageState extends State<RegisterPage> {
           password: password,
         ),
       );
-    } catch (_) {
+    } catch (error) {
       if (!mounted) {
         return;
       }
+      setState(() {
+        submitErrorMessage = error.toString().replaceFirst('Exception: ', '');
+      });
     } finally {
       if (mounted) {
         setState(() {
@@ -152,6 +204,7 @@ class _RegisterPageState extends State<RegisterPage> {
   void _toggleTerms() {
     setState(() {
       acceptedTerms = !acceptedTerms;
+      submitErrorMessage = null;
     });
   }
 
@@ -219,9 +272,12 @@ class _RegisterPageState extends State<RegisterPage> {
                             onChanged: (value) {
                               final bool nextIsValidPassword =
                                   value.trim().length >= _minPasswordLength;
-                              if (nextIsValidPassword != isValidPassword) {
+                              if (nextIsValidPassword != isValidPassword ||
+                                  showValidationErrors ||
+                                  submitErrorMessage != null) {
                                 setState(() {
                                   isValidPassword = nextIsValidPassword;
+                                  submitErrorMessage = null;
                                 });
                               }
                             },
@@ -264,6 +320,32 @@ class _RegisterPageState extends State<RegisterPage> {
                               ),
                             ),
                           ),
+                          if (_passwordError != null) ...[
+                            const SizedBox(height: 8),
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: Text(
+                                _passwordError!,
+                                style: const TextStyle(
+                                  color: Colors.red,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ] else ...[
+                            const SizedBox(height: 8),
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: Text(
+                                'Tối thiểu $_minPasswordLength ký tự',
+                                style: const TextStyle(
+                                  color: AppColors.primaryBlue,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ),
+                          ],
                         ],
                       )
                     : TextField(
@@ -272,9 +354,12 @@ class _RegisterPageState extends State<RegisterPage> {
                         keyboardType: TextInputType.phone,
                         onChanged: (value) {
                           final bool nextIsValidPhone = _isPhoneValid(value);
-                          if (nextIsValidPhone != isValidPhone) {
+                          if (nextIsValidPhone != isValidPhone ||
+                              showValidationErrors ||
+                              submitErrorMessage != null) {
                             setState(() {
                               isValidPhone = nextIsValidPhone;
+                              submitErrorMessage = null;
                             });
                           }
                         },
@@ -306,59 +391,110 @@ class _RegisterPageState extends State<RegisterPage> {
                         ),
                       ),
               ),
-              const SizedBox(height: 56),
-              Row(
-                children: [
-                  GestureDetector(
-                    onTap: _toggleTerms,
-                    child: Container(
-                      width: 34,
-                      height: 34,
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                          color: AppColors.checkboxBorder,
-                          width: 3,
-                        ),
-                      ),
-                      child: acceptedTerms
-                          ? const Icon(
-                              Icons.check,
-                              size: 22,
-                              color: AppColors.primaryBlue,
-                            )
-                          : null,
+              if (!isPasswordStep && _phoneError != null) ...[
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    _phoneError!,
+                    style: const TextStyle(
+                      color: Colors.red,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: RichText(
-                      text: const TextSpan(
-                        style: TextStyle(
-                          color: AppColors.primaryBlue,
-                          fontSize: 18,
-                        ),
-                        children: [
-                          TextSpan(text: 'Tôi đã đọc và đồng ý '),
-                          TextSpan(
-                            text: 'Điều khoản sử dụng',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w700,
-                              decoration: TextDecoration.underline,
-                            ),
+                ),
+              ],
+              const SizedBox(height: 56),
+              if (widget.continueToProfileSetup) ...[
+                Row(
+                  children: [
+                    GestureDetector(
+                      onTap: _toggleTerms,
+                      child: Container(
+                        width: 34,
+                        height: 34,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: AppColors.checkboxBorder,
+                            width: 3,
                           ),
-                        ],
+                        ),
+                        child: acceptedTerms
+                            ? const Icon(
+                                Icons.check,
+                                size: 22,
+                                color: AppColors.primaryBlue,
+                              )
+                            : null,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: RichText(
+                        text: const TextSpan(
+                          style: TextStyle(
+                            color: AppColors.primaryBlue,
+                            fontSize: 18,
+                          ),
+                          children: [
+                            TextSpan(text: 'Tôi đã đọc và đồng ý '),
+                            TextSpan(
+                              text: 'Điều khoản sử dụng',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                decoration: TextDecoration.underline,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                if (_termsError != null) ...[
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      _termsError!,
+                      style: const TextStyle(
+                        color: Colors.red,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
                   ),
                 ],
-              ),
-              const SizedBox(height: 16),
+                const SizedBox(height: 16),
+              ],
+              if ((submitErrorMessage ?? '').trim().isNotEmpty) ...[
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFE7E7),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: const Color(0xFFFFB7B7)),
+                  ),
+                  child: Text(
+                    submitErrorMessage!,
+                    style: const TextStyle(
+                      color: Color(0xFFB3261E),
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
               PrimaryPillButton(
                 label: isSubmitting ? 'Đang xử lý...' : 'Tiếp theo',
-                onPressed: (isPasswordStep ? isValidPassword : isValidPhone)
-                    ? _onContinuePressed
-                    : null,
+                onPressed: isSubmitting ? null : _onContinuePressed,
                 disabledBackgroundColor: AppColors.disabledButton,
                 disabledForegroundColor: AppColors.disabledText,
               ),

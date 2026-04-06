@@ -23,6 +23,7 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
   bool isSubmitting = false;
   bool showValidationErrors = false;
   DateTime? selectedBirthDate;
+  String? submitErrorMessage;
   final TextEditingController nameController = TextEditingController();
   final TextEditingController birthDateController = TextEditingController();
 
@@ -30,8 +31,12 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
     if (!showValidationErrors) {
       return null;
     }
-    if (nameController.text.trim().isEmpty) {
+    final String fullName = nameController.text.trim();
+    if (fullName.isEmpty) {
       return 'Vui lòng nhập tên';
+    }
+    if (fullName.length < 2) {
+      return 'Tên phải có ít nhất 2 ký tự';
     }
     return null;
   }
@@ -83,6 +88,7 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
       if (showValidationErrors) {
         showValidationErrors = false;
       }
+      submitErrorMessage = null;
     });
   }
 
@@ -106,6 +112,15 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
     }
 
     final String fullName = nameController.text.trim();
+    setState(() {
+      showValidationErrors = true;
+      submitErrorMessage = null;
+    });
+
+    if (_nameError != null || _birthDateError != null || _genderError != null) {
+      return;
+    }
+
     if (fullName.isEmpty || selectedBirthDate == null || isFemale == null) {
       setState(() {
         showValidationErrors = true;
@@ -144,10 +159,13 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
         AppRoutes.profileGreeting,
         arguments: ProfileGreetingRouteArgs(name: fullName),
       );
-    } catch (_) {
+    } catch (error) {
       if (!mounted) {
         return;
       }
+      setState(() {
+        submitErrorMessage = error.toString().replaceFirst('Exception: ', '');
+      });
     } finally {
       if (mounted) {
         setState(() {
@@ -190,9 +208,10 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
                 child: TextField(
                   controller: nameController,
                   onChanged: (_) {
-                    if (showValidationErrors) {
+                    if (showValidationErrors || submitErrorMessage != null) {
                       setState(() {
                         showValidationErrors = false;
+                        submitErrorMessage = null;
                       });
                     }
                   },
@@ -379,6 +398,29 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
                     _birthDateError!,
                     style: const TextStyle(
                       color: Colors.red,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+              if ((submitErrorMessage ?? '').trim().isNotEmpty) ...[
+                const SizedBox(height: 18),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFE7E7),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: const Color(0xFFFFB7B7)),
+                  ),
+                  child: Text(
+                    submitErrorMessage!,
+                    style: const TextStyle(
+                      color: Color(0xFFB3261E),
                       fontSize: 14,
                       fontWeight: FontWeight.w600,
                     ),

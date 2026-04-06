@@ -1992,6 +1992,37 @@ class _EditAccountProfilePageState extends State<_EditAccountProfilePage> {
   late final TextEditingController _nameController;
   late final TextEditingController _emailController;
   bool _isSaving = false;
+  bool _showValidationErrors = false;
+
+  String? get _nameError {
+    if (!_showValidationErrors) {
+      return null;
+    }
+
+    final String fullName = _nameController.text.trim();
+    if (fullName.isEmpty) {
+      return 'Vui lòng nhập họ và tên';
+    }
+    if (fullName.length < 2) {
+      return 'Tên phải có ít nhất 2 ký tự';
+    }
+    return null;
+  }
+
+  String? get _emailError {
+    if (!_showValidationErrors) {
+      return null;
+    }
+
+    final String email = _emailController.text.trim();
+    if (email.isEmpty) {
+      return null;
+    }
+    if (!RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(email)) {
+      return 'Email không đúng định dạng';
+    }
+    return null;
+  }
 
   @override
   void initState() {
@@ -2012,7 +2043,11 @@ class _EditAccountProfilePageState extends State<_EditAccountProfilePage> {
   Future<void> _saveProfile() async {
     final String fullName = _nameController.text.trim();
     final String email = _emailController.text.trim();
-    if (fullName.isEmpty) {
+    setState(() {
+      _showValidationErrors = true;
+    });
+
+    if (_nameError != null || _emailError != null) {
       return;
     }
 
@@ -2075,6 +2110,11 @@ class _EditAccountProfilePageState extends State<_EditAccountProfilePage> {
               const SizedBox(height: 8),
               TextField(
                 controller: _nameController,
+                onChanged: (_) {
+                  if (_showValidationErrors) {
+                    setState(() {});
+                  }
+                },
                 decoration: InputDecoration(
                   filled: true,
                   fillColor: Colors.white,
@@ -2085,6 +2125,17 @@ class _EditAccountProfilePageState extends State<_EditAccountProfilePage> {
                   ),
                 ),
               ),
+              if (_nameError != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  _nameError!,
+                  style: const TextStyle(
+                    color: Colors.red,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
               const SizedBox(height: 16),
               const Text(
                 'Email',
@@ -2098,6 +2149,11 @@ class _EditAccountProfilePageState extends State<_EditAccountProfilePage> {
               TextField(
                 controller: _emailController,
                 keyboardType: TextInputType.emailAddress,
+                onChanged: (_) {
+                  if (_showValidationErrors) {
+                    setState(() {});
+                  }
+                },
                 decoration: InputDecoration(
                   filled: true,
                   fillColor: Colors.white,
@@ -2108,6 +2164,17 @@ class _EditAccountProfilePageState extends State<_EditAccountProfilePage> {
                   ),
                 ),
               ),
+              if (_emailError != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  _emailError!,
+                  style: const TextStyle(
+                    color: Colors.red,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
               const SizedBox(height: 16),
               const Text(
                 'Số điện thoại',
