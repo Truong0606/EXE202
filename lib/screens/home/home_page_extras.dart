@@ -404,9 +404,10 @@ class _QuickEntryPageState extends State<QuickEntryPage> {
       barrierColor: Colors.transparent,
       transitionDuration: const Duration(milliseconds: 120),
       pageBuilder: (BuildContext dialogContext, _, __) {
+        final NavigatorState navigator = Navigator.of(dialogContext);
         Future<void>.delayed(const Duration(seconds: 1), () {
-          if (Navigator.of(dialogContext).canPop()) {
-            Navigator.of(dialogContext).pop();
+          if (navigator.mounted && navigator.canPop()) {
+            navigator.pop();
           }
         });
 
@@ -1182,10 +1183,95 @@ class _AiGlucoseScanPage extends StatefulWidget {
 
 class _AiGlucoseScanPageState extends State<_AiGlucoseScanPage> {
   final BackendApiService _backendApiService = BackendApiService.instance;
-  final ImagePicker _imagePicker = ImagePicker();
+  CameraController? _cameraController;
 
+  bool _isInitializingCamera = true;
   bool _isProcessing = false;
   String? _errorText;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_prepareCamera());
+  }
+
+  @override
+  void dispose() {
+    unawaited(_cameraController?.dispose());
+    super.dispose();
+  }
+
+  Future<void> _prepareCamera() async {
+    final bool hasAccess = await _requestCameraAccess();
+    if (!hasAccess) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isInitializingCamera = false;
+        _errorText = 'Ứng dụng cần quyền camera để quét máy đo trong app.';
+      });
+      return;
+    }
+
+    await _initializeCamera();
+  }
+
+  Future<void> _initializeCamera() async {
+    try {
+      await _cameraController?.dispose();
+
+      final List<CameraDescription> cameras = await availableCameras();
+      if (cameras.isEmpty) {
+        if (!mounted) {
+          return;
+        }
+
+        setState(() {
+          _isInitializingCamera = false;
+          _errorText = 'Không tìm thấy camera trên thiết bị này.';
+        });
+        return;
+      }
+
+      final CameraDescription selectedCamera = cameras.firstWhere(
+        (CameraDescription camera) =>
+            camera.lensDirection == CameraLensDirection.back,
+        orElse: () => cameras.first,
+      );
+
+      final CameraController controller = CameraController(
+        selectedCamera,
+        ResolutionPreset.high,
+        enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.jpeg,
+      );
+
+      await controller.initialize();
+      await controller.setFlashMode(FlashMode.off);
+
+      if (!mounted) {
+        await controller.dispose();
+        return;
+      }
+
+      setState(() {
+        _cameraController = controller;
+        _isInitializingCamera = false;
+        _errorText = null;
+      });
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isInitializingCamera = false;
+        _errorText = 'Không thể mở camera trong app. Hãy thử lại.';
+      });
+    }
+  }
 
 
   Future<bool> _requestCameraAccess() async {
@@ -1318,7 +1404,8 @@ class _AiGlucoseScanPageState extends State<_AiGlucoseScanPage> {
   }
 
   Future<void> _captureAndAnalyze() async {
-    if (_isProcessing) {
+    final CameraController? controller = _cameraController;
+    if (_isProcessing || controller == null || !controller.value.isInitialized) {
       return;
     }
 
@@ -1328,29 +1415,7 @@ class _AiGlucoseScanPageState extends State<_AiGlucoseScanPage> {
     });
 
     try {
-      final bool hasAccess = await _requestCameraAccess();
-      if (!hasAccess) {
-        if (mounted) {
-          setState(() {
-            _isProcessing = false;
-          });
-        }
-        return;
-      }
-
-      final XFile? file = await _imagePicker.pickImage(
-        source: ImageSource.camera,
-        imageQuality: 92,
-        preferredCameraDevice: CameraDevice.rear,
-      );
-      if (file == null) {
-        if (mounted) {
-          setState(() {
-            _isProcessing = false;
-          });
-        }
-        return;
-      }
+      final XFile file = await controller.takePicture();
 
       final AiChatResultData result = await _backendApiService.sendAiChatMessage(
         message:
@@ -1382,6 +1447,117 @@ class _AiGlucoseScanPageState extends State<_AiGlucoseScanPage> {
             'Không thể quét ảnh lúc này. Hãy thử lại với ảnh rõ hơn.';
       });
     }
+  }
+
+  Widget _buildCameraFrameContent() {
+    if (_isInitializingCamera) {
+      return const Center(
+        child: CircularProgressIndicator(
+          valueColor: AlwaysStoppedAnimation<Color>(Color(0xFF6BD7FF)),
+        ),
+      );
+    }
+
+    final CameraController? controller = _cameraController;
+    if (controller == null || !controller.value.isInitialized) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 18),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.videocam_off_outlined,
+                color: Color(0x886BD7FF),
+                size: 52,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                _errorText ?? 'Không thể mở camera',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Color(0xCCFFFFFF),
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                  height: 1.25,
+                ),
+              ),
+              const SizedBox(height: 14),
+              TextButton(
+                onPressed: () {
+                  setState(() {
+                    _isInitializingCamera = true;
+                    _errorText = null;
+                  });
+                  unawaited(_prepareCamera());
+                },
+                child: const Text(
+                  'Thử lại',
+                  style: TextStyle(
+                    color: Color(0xFF6BD7FF),
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final Size? previewSize = controller.value.previewSize;
+    if (previewSize == null) {
+      return const SizedBox.shrink();
+    }
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        ClipRRect(
+          borderRadius: BorderRadius.circular(24),
+          child: SizedBox.expand(
+            child: FittedBox(
+              fit: BoxFit.cover,
+              alignment: Alignment.center,
+              child: SizedBox(
+                width: previewSize.height,
+                height: previewSize.width,
+                child: CameraPreview(controller),
+              ),
+            ),
+          ),
+        ),
+        Positioned.fill(
+          child: Container(
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(24),
+            ),
+          ),
+        ),
+        Align(
+          alignment: Alignment.bottomCenter,
+          child: Container(
+            margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.34),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: const Text(
+              'Đưa máy đo vào trong khung',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
   }
 
   @override
@@ -1443,43 +1619,11 @@ class _AiGlucoseScanPageState extends State<_AiGlucoseScanPage> {
                               child: Stack(
                                 children: [
                                   Positioned.fill(
-                                    child: Container(
-                                      decoration: BoxDecoration(
-                                        color: Colors.white.withValues(alpha: 0.05),
-                                        borderRadius: BorderRadius.circular(24),
-                                        border: Border.all(
-                                          color: Colors.white.withValues(alpha: 0.08),
-                                        ),
-                                      ),
-                                    ),
+                                      child: _buildCameraFrameContent(),
                                   ),
                                   Positioned.fill(
                                     child: CustomPaint(
                                       painter: const _AiScanFramePainter(),
-                                    ),
-                                  ),
-                                  const Align(
-                                    alignment: Alignment.center,
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(
-                                          Icons.photo_camera_outlined,
-                                          color: Color(0x886BD7FF),
-                                          size: 56,
-                                        ),
-                                        SizedBox(height: 12),
-                                        Text(
-                                          'Đưa máy đo vào khung\nrồi nhấn chụp hình',
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(
-                                            color: Color(0xCCFFFFFF),
-                                            fontSize: 17,
-                                            fontWeight: FontWeight.w700,
-                                            height: 1.25,
-                                          ),
-                                        ),
-                                      ],
                                     ),
                                   ),
                                 ],
@@ -3676,11 +3820,158 @@ class _FollowPersonTile extends StatelessWidget {
   }
 }
 
-class _BlogTab extends StatelessWidget {
-  const _BlogTab({required this.onBackToHome, this.article});
+class _BlogTab extends StatefulWidget {
+  const _BlogTab({
+    required this.onBackToHome,
+    required this.onRetry,
+    this.articles = const <BlogArticleData>[],
+    this.errorMessage,
+    this.isLoading = false,
+  });
 
   final VoidCallback onBackToHome;
-  final BlogArticleData? article;
+  final Future<void> Function() onRetry;
+  final List<BlogArticleData> articles;
+  final String? errorMessage;
+  final bool isLoading;
+
+  @override
+  State<_BlogTab> createState() => _BlogTabState();
+}
+
+class _BlogTabState extends State<_BlogTab> {
+  final BackendApiService _backendApiService = BackendApiService.instance;
+
+  final Map<String, BlogArticleData> _articleCache = <String, BlogArticleData>{};
+  String? _selectedArticleId;
+  BlogArticleData? _selectedArticle;
+  String? _selectedArticleErrorMessage;
+  bool _isLoadingSelectedArticle = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncArticles(forceSelectFirst: true);
+  }
+
+  @override
+  void didUpdateWidget(covariant _BlogTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.articles != widget.articles ||
+        oldWidget.isLoading != widget.isLoading) {
+      _syncArticles(forceSelectFirst: oldWidget.articles.isEmpty);
+    }
+  }
+
+  void _syncArticles({bool forceSelectFirst = false}) {
+    for (final BlogArticleData article in widget.articles) {
+      if (article.id.isNotEmpty && !_articleCache.containsKey(article.id)) {
+        _articleCache[article.id] = article;
+      }
+    }
+
+    if (widget.articles.isEmpty) {
+      if (!mounted) {
+        _selectedArticleId = null;
+        _selectedArticle = null;
+        _selectedArticleErrorMessage = null;
+        _isLoadingSelectedArticle = false;
+        return;
+      }
+      setState(() {
+        _selectedArticleId = null;
+        _selectedArticle = null;
+        _selectedArticleErrorMessage = null;
+        _isLoadingSelectedArticle = false;
+      });
+      return;
+    }
+
+    final bool currentSelectionStillExists = _selectedArticleId != null &&
+        widget.articles.any((BlogArticleData article) => article.id == _selectedArticleId);
+    final BlogArticleData nextArticle = currentSelectionStillExists && !forceSelectFirst
+        ? widget.articles.firstWhere(
+            (BlogArticleData article) => article.id == _selectedArticleId,
+          )
+        : widget.articles.first;
+
+    unawaited(_selectArticle(nextArticle, fetchDetail: true));
+  }
+
+  Future<void> _selectArticle(
+    BlogArticleData article, {
+    bool fetchDetail = true,
+  }) async {
+    final String articleId = article.id.trim();
+    final BlogArticleData cachedArticle = articleId.isEmpty
+        ? article
+        : (_articleCache[articleId] ?? article);
+
+    if (mounted) {
+      setState(() {
+        _selectedArticleId = articleId.isEmpty ? null : articleId;
+        _selectedArticle = cachedArticle;
+        _selectedArticleErrorMessage = null;
+      });
+    } else {
+      _selectedArticleId = articleId.isEmpty ? null : articleId;
+      _selectedArticle = cachedArticle;
+      _selectedArticleErrorMessage = null;
+    }
+
+    if (!fetchDetail || articleId.isEmpty || cachedArticle.body.isNotEmpty) {
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _isLoadingSelectedArticle = true;
+      });
+    } else {
+      _isLoadingSelectedArticle = true;
+    }
+
+    try {
+      final BlogArticleData? detail = await _backendApiService
+          .fetchBlogArticleDetail(articleId);
+      if (!mounted || _selectedArticleId != articleId || detail == null) {
+        return;
+      }
+
+      final BlogArticleData mergedDetail = BlogArticleData(
+        id: detail.id.isEmpty ? articleId : detail.id,
+        title: detail.title.trim().isEmpty ? article.title : detail.title,
+        publishedInfo: detail.publishedInfo.trim().isEmpty
+            ? article.publishedInfo
+            : detail.publishedInfo,
+        summary: detail.summary.trim().isEmpty ? article.summary : detail.summary,
+        body: detail.body,
+        imageUrl: detail.imageUrl ?? article.imageUrl,
+      );
+
+      _articleCache[articleId] = mergedDetail;
+      setState(() {
+        _selectedArticle = mergedDetail;
+      });
+    } catch (error) {
+      if (!mounted || _selectedArticleId != articleId) {
+        return;
+      }
+      setState(() {
+        _selectedArticleErrorMessage = error
+            .toString()
+            .replaceFirst('Exception: ', '');
+      });
+    } finally {
+      if (mounted && _selectedArticleId == articleId) {
+        setState(() {
+          _isLoadingSelectedArticle = false;
+        });
+      } else {
+        _isLoadingSelectedArticle = false;
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -3702,7 +3993,7 @@ class _BlogTab extends StatelessWidget {
             child: Row(
               children: [
                 IconButton(
-                  onPressed: onBackToHome,
+                  onPressed: widget.onBackToHome,
                   icon: const Icon(
                     Icons.chevron_left,
                     color: Colors.white,
@@ -3725,9 +4016,57 @@ class _BlogTab extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(20, 24, 20, 110),
-              child: _BlogArticleCard(article: article),
+            child: RefreshIndicator(
+              onRefresh: widget.onRetry,
+              child: SingleChildScrollView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.fromLTRB(20, 24, 20, 110),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (widget.articles.isNotEmpty) ...[
+                      const Text(
+                        'Chọn bài viết',
+                        style: TextStyle(
+                          color: Color(0xFF17324F),
+                          fontSize: 18,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        height: 118,
+                        child: ListView.separated(
+                          scrollDirection: Axis.horizontal,
+                          itemCount: widget.articles.length,
+                          separatorBuilder: (_, __) => const SizedBox(width: 12),
+                          itemBuilder: (BuildContext context, int index) {
+                            final BlogArticleData item = widget.articles[index];
+                            final bool isSelected = item.id.isNotEmpty
+                                ? item.id == _selectedArticleId
+                                : identical(item, _selectedArticle);
+                            return _BlogArticleOptionCard(
+                              article: item,
+                              isSelected: isSelected,
+                              onTap: () {
+                                unawaited(_selectArticle(item, fetchDetail: true));
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                    ],
+                    _BlogArticleCard(
+                      article: _selectedArticle,
+                      errorMessage: _selectedArticleErrorMessage ?? widget.errorMessage,
+                      isLoading: widget.isLoading,
+                      isRefreshingDetail: _isLoadingSelectedArticle,
+                      onRetry: widget.onRetry,
+                    ),
+                  ],
+                ),
+              ),
             ),
           ),
         ],
@@ -3737,9 +4076,19 @@ class _BlogTab extends StatelessWidget {
 }
 
 class _BlogArticleCard extends StatelessWidget {
-  const _BlogArticleCard({this.article});
+  const _BlogArticleCard({
+    this.article,
+    this.errorMessage,
+    this.isLoading = false,
+    this.isRefreshingDetail = false,
+    this.onRetry,
+  });
 
   final BlogArticleData? article;
+  final String? errorMessage;
+  final bool isLoading;
+  final bool isRefreshingDetail;
+  final Future<void> Function()? onRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -3759,29 +4108,13 @@ class _BlogArticleCard extends StatelessWidget {
       );
     }
 
-    if (article == null) {
+    if (isLoading) {
       return Container(
         width: double.infinity,
         padding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(
-              width: double.infinity,
-              height: 190,
-              decoration: BoxDecoration(
-                color: const Color(0xFF8FC7DF),
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: const Center(
-                child: Icon(
-                  Icons.image_outlined,
-                  color: Colors.white,
-                  size: 40,
-                ),
-              ),
-            ),
-            const SizedBox(height: 14),
             skeletonLine(0.42, height: 9),
             const SizedBox(height: 10),
             skeletonLine(0.95, height: 22),
@@ -3808,41 +4141,133 @@ class _BlogArticleCard extends StatelessWidget {
       );
     }
 
+    if (article == null) {
+      final String message = (errorMessage ?? 'Không có bài viết để hiển thị').trim();
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: const Color(0xFFB7D0DE),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(
+                  Icons.info_outline,
+                  color: Color(0xFF17324F),
+                  size: 22,
+                ),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Blog chưa tải được',
+                    style: TextStyle(
+                      color: Color(0xFF17324F),
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              message,
+              style: const TextStyle(
+                color: Color(0xFF29475C),
+                fontSize: 14,
+                height: 1.5,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'API hiện được tài liệu hóa ở /v1/patient/articles?language=VI và yêu cầu đăng nhập.',
+              style: TextStyle(
+                color: Color(0xFF446276),
+                fontSize: 13,
+                height: 1.45,
+              ),
+            ),
+            const SizedBox(height: 14),
+            SizedBox(
+              height: 42,
+              child: ElevatedButton(
+                onPressed: onRetry == null ? null : () => onRetry!.call(),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF17324F),
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                child: const Text('Thử tải lại'),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: double.infinity,
-            height: 190,
-            decoration: BoxDecoration(
-              color: const Color(0xFF8FC7DF),
-              borderRadius: BorderRadius.circular(14),
-            ),
-            clipBehavior: Clip.antiAlias,
-            child: article!.imageUrl == null || article!.imageUrl!.isEmpty
-                ? const Center(
-                    child: Icon(
-                      Icons.image_outlined,
-                      color: Colors.white,
-                      size: 40,
-                    ),
-                  )
-                : Image.network(
-                    article!.imageUrl!,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => const Center(
-                      child: Icon(
-                        Icons.broken_image_outlined,
-                        color: Colors.white,
-                        size: 40,
+          if (isRefreshingDetail) ...[
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFD6E8F1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Row(
+                children: [
+                  SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Đang tải chi tiết bài viết...',
+                      style: TextStyle(
+                        color: Color(0xFF29475C),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
                   ),
-          ),
-          const SizedBox(height: 14),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
+          if ((errorMessage ?? '').trim().isNotEmpty) ...[
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFE0EAF0),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                errorMessage!.trim(),
+                style: const TextStyle(
+                  color: Color(0xFF29475C),
+                  fontSize: 13,
+                  height: 1.4,
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
           Text(
             article!.publishedInfo,
             style: const TextStyle(
@@ -3872,7 +4297,19 @@ class _BlogArticleCard extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 14),
-          ...article!.body.map(
+          ...(article!.body.isEmpty
+              ? <Widget>[
+                  Text(
+                    article!.summary,
+                    style: const TextStyle(
+                      color: Color(0xFF2C4354),
+                      fontSize: 14,
+                      height: 1.55,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ]
+              : article!.body.map(
             (String paragraph) => Padding(
               padding: const EdgeInsets.only(bottom: 10),
               child: Text(
@@ -3885,8 +4322,90 @@ class _BlogArticleCard extends StatelessWidget {
                 ),
               ),
             ),
-          ),
+          )),
         ],
+      ),
+    );
+  }
+}
+
+class _BlogArticleOptionCard extends StatelessWidget {
+  const _BlogArticleOptionCard({
+    required this.article,
+    required this.isSelected,
+    required this.onTap,
+  });
+
+  final BlogArticleData article;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        width: 220,
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: isSelected ? const Color(0xFF17324F) : const Color(0xFFD9EAF3),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: isSelected ? const Color(0xFF07173A) : const Color(0xFFB1CAD7),
+            width: 1.2,
+          ),
+          boxShadow: isSelected
+              ? const [
+                  BoxShadow(
+                    color: Color(0x22000000),
+                    blurRadius: 10,
+                    offset: Offset(0, 4),
+                  ),
+                ]
+              : const <BoxShadow>[],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              article.publishedInfo,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: isSelected ? const Color(0xFFD6EAF5) : const Color(0xFF557488),
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: Text(
+                article.title,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: isSelected ? Colors.white : const Color(0xFF17324F),
+                  fontSize: 16,
+                  fontWeight: FontWeight.w800,
+                  height: 1.15,
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              article.summary,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: isSelected ? const Color(0xFFE7F3FA) : const Color(0xFF456276),
+                fontSize: 12,
+                height: 1.35,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

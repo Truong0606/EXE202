@@ -168,12 +168,88 @@ class BackendApiService {
     throw Exception(message);
   }
 
-  Future<BlogArticleData?> fetchLatestBlogArticle() async {
-    final Map<String, dynamic>? json = await _getJson('/api/blog/latest');
-    if (json == null) {
+  Future<List<BlogArticleData>> fetchPublishedBlogArticles({
+    int page = 1,
+    int limit = 20,
+    String language = 'VI',
+  }) async {
+    final Uri uri = Uri.parse(
+      '$_baseUrl/v1/patient/articles',
+    ).replace(
+      queryParameters: <String, String>{
+        'page': '$page',
+        'limit': '$limit',
+        'language': language,
+      },
+    );
+    final http.Response response = await http.get(
+      uri,
+      headers: await _authorizedHeaders(),
+    );
+
+    final Map<String, dynamic> body = _safeDecodeMap(response.body);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final String message =
+          (body['message'] ?? 'Không thể tải bài viết').toString();
+      throw Exception(message);
+    }
+
+    return _extractDataList(body)
+        .map(BlogArticleData.fromJson)
+        .where((BlogArticleData article) => article.title.trim().isNotEmpty)
+        .toList();
+  }
+
+  Future<BlogArticleData?> fetchBlogArticleDetail(String articleId) async {
+    final Uri uri = Uri.parse('$_baseUrl/v1/patient/articles/$articleId');
+    final http.Response response = await http.get(
+      uri,
+      headers: await _authorizedHeaders(),
+    );
+
+    final Map<String, dynamic> body = _safeDecodeMap(response.body);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final String message =
+          (body['message'] ?? 'Không thể tải chi tiết bài viết').toString();
+      throw Exception(message);
+    }
+
+    final Map<String, dynamic> articleDetail = _extractDataMap(body);
+    if (articleDetail.isEmpty) {
       return null;
     }
-    return BlogArticleData.fromJson(json);
+
+    return BlogArticleData.fromJson(articleDetail);
+  }
+
+  Future<BlogArticleData?> fetchLatestBlogArticle() async {
+    final List<BlogArticleData> articles = await fetchPublishedBlogArticles(
+      page: 1,
+      limit: 1,
+    );
+    if (articles.isEmpty) {
+      return null;
+    }
+
+    final BlogArticleData articleSummary = articles.first;
+    final String articleId = articleSummary.id.trim();
+    if (articleId.isEmpty) {
+      return articleSummary;
+    }
+
+    final BlogArticleData? articleDetail = await fetchBlogArticleDetail(articleId);
+    if (articleDetail == null) {
+      return articleSummary;
+    }
+
+    return BlogArticleData.fromJson(<String, dynamic>{
+      'id': articleSummary.id,
+      'title': articleSummary.title,
+      'publishedInfo': articleSummary.publishedInfo,
+      'summary': articleSummary.summary,
+      'body': articleDetail.body,
+      'imageUrl': articleDetail.imageUrl ?? articleSummary.imageUrl,
+    });
   }
 
   Future<List<FollowMemberData>> fetchFollowMembers() async {

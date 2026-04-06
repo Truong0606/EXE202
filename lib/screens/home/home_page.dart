@@ -2,7 +2,9 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:camera/camera.dart';
 import 'package:first_app/core/models/dashboard_models.dart';
+import 'package:first_app/core/services/account_settings_service.dart';
 import 'package:first_app/core/services/auth_storage_service.dart';
 import 'package:first_app/core/services/backend_api_service.dart';
 import 'package:first_app/core/services/notification_service.dart';
@@ -29,10 +31,15 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final BackendApiService _backendApiService = BackendApiService.instance;
+  final AccountSettingsService _accountSettingsService =
+      AccountSettingsService.instance;
 
   late int currentTabIndex;
   String _displayName = 'GluCare';
-  BlogArticleData? _blogArticle;
+  UserProfileData? _currentUserProfile;
+  List<BlogArticleData> _blogArticles = const <BlogArticleData>[];
+  String? _blogArticleErrorMessage;
+  bool _isLoadingBlogArticle = true;
   List<FollowMemberData> _followMembers = const <FollowMemberData>[];
 
   @override
@@ -55,9 +62,14 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _loadCurrentUserProfile() async {
-    final UserProfileData? userProfile = await _backendApiService
+    UserProfileData? userProfile = await _backendApiService
         .fetchCurrentUserProfile();
     if (!mounted || userProfile == null) {
+      return;
+    }
+
+    userProfile = await _accountSettingsService.applyProfileOverrides(userProfile);
+    if (!mounted) {
       return;
     }
 
@@ -67,7 +79,17 @@ class _HomePageState extends State<HomePage> {
     }
 
     setState(() {
+      _currentUserProfile = userProfile;
       _displayName = fullName;
+    });
+  }
+
+  void _handleProfileUpdated(UserProfileData profile) {
+    setState(() {
+      _currentUserProfile = profile;
+      if (profile.fullName.trim().isNotEmpty) {
+        _displayName = profile.fullName.trim();
+      }
     });
   }
 
@@ -89,19 +111,37 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _loadDashboardApiData() async {
-    final BlogArticleData? article = await _backendApiService
-        .fetchLatestBlogArticle();
-    final List<FollowMemberData> members = await _backendApiService
-        .fetchFollowMembers();
+    List<BlogArticleData> articles = const <BlogArticleData>[];
+    String? blogArticleErrorMessage;
+    List<FollowMemberData> members = const <FollowMemberData>[];
+
+    try {
+      articles = await _backendApiService.fetchPublishedBlogArticles();
+    } catch (error) {
+      blogArticleErrorMessage = error.toString().replaceFirst('Exception: ', '');
+    }
+
+    try {
+      members = await _backendApiService.fetchFollowMembers();
+    } catch (_) {}
 
     if (!mounted) {
       return;
     }
 
     setState(() {
-      _blogArticle = article;
+      _blogArticles = articles;
+      _blogArticleErrorMessage = blogArticleErrorMessage;
+      _isLoadingBlogArticle = false;
       _followMembers = members;
     });
+  }
+
+  Future<void> _refreshHomeData() async {
+    await Future.wait<void>(<Future<void>>[
+      _loadDashboardApiData(),
+      _loadCurrentUserProfile(),
+    ]);
   }
 
   @override
@@ -114,6 +154,7 @@ class _HomePageState extends State<HomePage> {
           children: [
             _DashboardTab(
               displayName: _displayName,
+              onRefreshHomeData: _refreshHomeData,
               onOpenAiTab: () {
                 setState(() {
                   currentTabIndex = 2;
@@ -134,9 +175,15 @@ class _HomePageState extends State<HomePage> {
                   currentTabIndex = 0;
                 });
               },
-              article: _blogArticle,
+              articles: _blogArticles,
+              errorMessage: _blogArticleErrorMessage,
+              isLoading: _isLoadingBlogArticle,
+              onRetry: _refreshHomeData,
             ),
-            const _AccountTab(),
+            _AccountTab(
+              profile: _currentUserProfile,
+              onProfileUpdated: _handleProfileUpdated,
+            ),
           ],
         ),
       ),
@@ -156,10 +203,12 @@ class _DashboardTab extends StatefulWidget {
   const _DashboardTab({
     required this.onOpenAiTab,
     required this.displayName,
+    required this.onRefreshHomeData,
   });
 
   final VoidCallback onOpenAiTab;
   final String displayName;
+  final Future<void> Function() onRefreshHomeData;
 
   @override
   State<_DashboardTab> createState() => _DashboardTabState();
@@ -229,6 +278,13 @@ class _DashboardTabState extends State<_DashboardTab> {
       _loadGlucoseGraph24hData(),
       _loadWeeklyComplianceScore(),
       _loadSelectedDateRecords(),
+    ]);
+  }
+
+  Future<void> _handleRefresh() async {
+    await Future.wait<void>(<Future<void>>[
+      _refreshGlucoseData(),
+      widget.onRefreshHomeData(),
     ]);
   }
 
@@ -330,167 +386,111 @@ class _DashboardTabState extends State<_DashboardTab> {
     await _loadSelectedDateRecords();
   }
 
-  Future<void> _showDayHistoryPopup(DateTime day) async {
-    final List<GlucoseHistoryItemData> records = await _backendApiService
-        .fetchGlucoseHistoryByDate(day);
-    if (!mounted) {
-      return;
-    }
-
-    await showDialog<void>(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: Text('Lịch sử ngày ${_formatDayLabel(day)}'),
-          content: SizedBox(
-            width: 320,
-            child: records.isEmpty
-                ? const Text('Không có dữ liệu trong ngày này')
-                : SingleChildScrollView(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: records.map((GlucoseHistoryItemData record) {
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 10),
-                          child: Text(
-                            '${_formatTimeOnly(record.recordedAt)}  •  ${_mealContextLabel(record.mealContext)}  •  ${_formatGlucoseValue(record.glucoseValue)} mg/dL',
-                            style: const TextStyle(
-                              color: Color(0xFF17324F),
-                              fontSize: 13,
-                              height: 1.35,
-                            ),
-                          ),
-                        );
-                      }).toList(),
-                    ),
-                  ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Đóng'),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final String latestGlucose = _latestGlucoseHistory == null
-      ? '--'
-      : _latestGlucoseHistory!.glucoseValue.round().toString();
+        ? '--'
+        : _latestGlucoseHistory!.glucoseValue.round().toString();
     final String latestMealContext = _latestGlucoseHistory == null
         ? 'Chưa có dữ liệu'
         : _mealContextLabel(_latestGlucoseHistory!.mealContext);
     final String latestRecordedAtLabel = _latestGlucoseHistory == null
-      ? '--:--'
-      : _formatRecordedAtLabel(_latestGlucoseHistory!.recordedAt);
+        ? '--:--'
+        : _formatRecordedAtLabel(_latestGlucoseHistory!.recordedAt);
     final String weeklyScoreText = _formatScore(_weeklyComplianceScore);
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(8, 0, 8, 0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.fromLTRB(14, 8, 14, 12),
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                stops: [0.28, 0.73],
-                colors: [Color(0xFF1564A6), Color(0xFF07173A)],
+    return RefreshIndicator(
+      onRefresh: _handleRefresh,
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(8, 0, 8, 0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(14, 8, 14, 12),
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  stops: [0.28, 0.73],
+                  colors: [Color(0xFF1564A6), Color(0xFF07173A)],
+                ),
               ),
-            ),
-            child: Column(
-              children: [
-                Row(
-                  children: [
-                    const _SafeAssetImage(
-                      path: 'assets/images/homepage/Mascot Hello 1 1.png',
-                      width: 56,
-                      height: 56,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        'Xin chào,\n${widget.displayName}',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 20,
-                          fontWeight: FontWeight.w700,
-                          height: 1.05,
-                        ),
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      const _SafeAssetImage(
+                        path: 'assets/images/homepage/Mascot Hello 1 1.png',
+                        width: 56,
+                        height: 56,
                       ),
-                    ),
-                    Container(
-                      width: 56,
-                      height: 56,
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          begin: Alignment.centerLeft,
-                          end: Alignment.centerRight,
-                          colors: [Color(0xFFDFF5FF), Color(0xFF6BD0FF)],
-                        ),
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      child: Stack(
-                        clipBehavior: Clip.none,
-                        children: [
-                          const Center(
-                            child: Icon(
-                              Icons.notifications_none,
-                              color: Color(0xFF0D3A63),
-                              size: 32,
-                            ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'Xin chào,\n${widget.displayName}',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 20,
+                            fontWeight: FontWeight.w700,
+                            height: 1.05,
                           ),
-                          Positioned(
-                            right: 10,
-                            top: 11,
-                            child: Container(
-                              width: 10,
-                              height: 10,
-                              decoration: const BoxDecoration(
-                                color: Color(0xFFFF4D4F),
-                                shape: BoxShape.circle,
+                        ),
+                      ),
+                      Container(
+                        width: 56,
+                        height: 56,
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(
+                            begin: Alignment.centerLeft,
+                            end: Alignment.centerRight,
+                            colors: [Color(0xFFDFF5FF), Color(0xFF6BD0FF)],
+                          ),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            const Center(
+                              child: Icon(
+                                Icons.notifications_none,
+                                color: Color(0xFF0D3A63),
+                                size: 32,
                               ),
                             ),
-                          ),
-                        ],
+                            Positioned(
+                              right: 10,
+                              top: 11,
+                              child: Container(
+                                width: 10,
+                                height: 10,
+                                decoration: const BoxDecoration(
+                                  color: Color(0xFFFF4D4F),
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
-                ),
-              ],
+                    ],
+                  ),
+                ],
+              ),
             ),
-          ),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.fromLTRB(8, 12, 8, 14),
-            color: const Color(0xFFDDF2FB),
-            child: Column(
-              children: [
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 10,
-                  ),
-                  decoration: BoxDecoration(
-                    gradient: const LinearGradient(
-                      begin: Alignment.centerLeft,
-                      end: Alignment.centerRight,
-                      colors: [Color(0xFFDFF5FF), Color(0xFF6BD0FF)],
-                    ),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Container(
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(8, 12, 8, 14),
+              color: const Color(0xFFDDF2FB),
+              child: Column(
+                children: [
+                  Container(
+                    width: double.infinity,
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 8,
+                      horizontal: 12,
+                      vertical: 10,
                     ),
                     decoration: BoxDecoration(
                       gradient: const LinearGradient(
@@ -499,459 +499,472 @@ class _DashboardTabState extends State<_DashboardTab> {
                         colors: [Color(0xFFDFF5FF), Color(0xFF6BD0FF)],
                       ),
                       borderRadius: BorderRadius.circular(12),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Color(0x24000000),
-                          blurRadius: 8,
-                          offset: Offset(0, 4),
-                        ),
-                      ],
                     ),
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(12),
-                      onTap: widget.onOpenAiTab,
-                      child: Row(
-                        children: [
-                          const _SafeAssetImage(
-                            path: 'assets/images/homepage/Mascot Head 2 3.png',
-                            width: 40,
-                            height: 40,
-                          ),
-                          const SizedBox(width: 8),
-                          const Expanded(
-                            child: Text(
-                              'Hỏi Cam Cam: Tôi nên ăn gì hôm nay?',
-                              style: TextStyle(
-                                color: Color(0xFF6D8A9E),
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                          const Icon(
-                            Icons.mic,
-                            color: Color(0xFF2D7FB4),
-                            size: 23,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(
+                          begin: Alignment.centerLeft,
+                          end: Alignment.centerRight,
+                          colors: [Color(0xFFDFF5FF), Color(0xFF6BD0FF)],
+                        ),
+                        borderRadius: BorderRadius.circular(12),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x24000000),
+                            blurRadius: 8,
+                            offset: Offset(0, 4),
                           ),
                         ],
                       ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Expanded(
-                      child: SizedBox(
-                        height: 160,
-                        child: _HomeCard(
-                          trailing: Container(
-                            width: 52,
-                            height: 52,
-                            decoration: const BoxDecoration(
-                              color: Color(0xFF73D4C7),
-                              shape: BoxShape.circle,
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(12),
+                        onTap: widget.onOpenAiTab,
+                        child: Row(
+                          children: [
+                            const _SafeAssetImage(
+                              path: 'assets/images/homepage/Mascot Head 2 3.png',
+                              width: 40,
+                              height: 40,
                             ),
-                            child: Center(
-                              child: Container(
-                                width: 28,
-                                height: 28,
-                                decoration: const BoxDecoration(
-                                  color: Color(0xFFDDF2FB),
-                                  shape: BoxShape.circle,
-                                ),
-                              ),
-                            ),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                'Lượng đường đo gần nhất',
+                            const SizedBox(width: 8),
+                            const Expanded(
+                              child: Text(
+                                'Hỏi Cam Cam: Tôi nên ăn gì hôm nay?',
                                 style: TextStyle(
-                                  color: Color(0xFF0B3159),
+                                  color: Color(0xFF6D8A9E),
                                   fontSize: 13,
-                                  fontWeight: FontWeight.w700,
+                                  fontWeight: FontWeight.w600,
                                 ),
                               ),
-                              const SizedBox(height: 6),
-                              FittedBox(
-                                fit: BoxFit.scaleDown,
-                                alignment: Alignment.centerLeft,
-                                child: Row(
-                                  crossAxisAlignment: CrossAxisAlignment.end,
-                                  children: [
-                                    Text(
-                                      latestGlucose,
-                                      style: TextStyle(
-                                        color: Color(0xFF17324F),
-                                        fontSize: 34,
-                                        fontWeight: FontWeight.w500,
-                                        height: 1,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 4),
-                                    const Padding(
-                                      padding: EdgeInsets.only(bottom: 5),
-                                      child: Text(
-                                        'mg/dL',
-                                        style: TextStyle(
-                                          color: Color(0xFF17324F),
-                                          fontSize: 14,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                '$latestMealContext\nVào lúc $latestRecordedAtLabel',
-                                style: TextStyle(
-                                  color: Color(0xFF4F6780),
-                                  fontSize: 12,
-                                  height: 1.35,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: SizedBox(
-                        height: 160,
-                        child: _HomeCard(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                'Đường huyết trong 24h qua',
-                                style: TextStyle(
-                                  color: Color(0xFF0B3159),
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Expanded(
-                                child: Center(
-                                  child: _Glucose24hGraph(
-                                    dataPoints: _glucose24hPoints,
-                                  ),
-                                ),
-                              ),
-                              Align(
-                                alignment: Alignment.centerRight,
-                                child: InkWell(
-                                  onTap: () {
-                                    Navigator.of(context).pushNamed(
-                                      AppRoutes.glucose24hDetail,
-                                      arguments: List<double>.from(
-                                        _glucose24hPoints,
-                                      ),
-                                    );
-                                  },
-                                  child: Text(
-                                    'Xem chi tiết →',
-                                    style: TextStyle(
-                                      color: AppColors.deepBlue,
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                _HomeCard(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Mục tiêu đường huyết',
-                        style: TextStyle(
-                          color: Color(0xFF0B3159),
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text.rich(
-                                TextSpan(
-                                  children: [
-                                    TextSpan(
-                                      text: weeklyScoreText,
-                                      style: const TextStyle(
-                                        color: Color(0xFF17324F),
-                                        fontSize: 44,
-                                        fontWeight: FontWeight.w500,
-                                        height: 1,
-                                      ),
-                                    ),
-                                    const TextSpan(
-                                      text: '%',
-                                      style: TextStyle(
-                                        color: Color(0xFF17324F),
-                                        fontSize: 30,
-                                        fontWeight: FontWeight.w500,
-                                        height: 1,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                'Mục tiêu tuần này:  40%',
-                                style: const TextStyle(
-                                  color: Color(0xFF4F6780),
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.end,
-                              children: [
-                                SizedBox(
-                                  width: 74,
-                                  height: 74,
-                                  child: _AnimatedGoalHeart(
-                                    score: _weeklyComplianceScore,
-                                  ),
-                                ),
-                              ],
                             ),
-                          ),
-                        ],
+                            const Icon(
+                              Icons.mic,
+                              color: Color(0xFF2D7FB4),
+                              size: 23,
+                            ),
+                          ],
+                        ),
                       ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 10,
-                  ),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(14),
-                    gradient: const LinearGradient(
-                      colors: [Color(0xFF6FC8ED), Color(0xFF9BD9F4)],
-                    ),
-                    boxShadow: const [
-                      BoxShadow(
-                        color: Color(0x26000000),
-                        blurRadius: 7,
-                        offset: Offset(0, 3),
-                      ),
-                    ],
-                  ),
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(14),
-                    onTap: () {
-                      Navigator.of(context).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) => QuickEntryPage(
-                            onGlucoseSaved: _refreshGlucoseData,
-                          ),
-                        ),
-                      );
-                    },
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const _SafeAssetImage(
-                          path: 'assets/images/homepage/Mascot Talk 1 1.png',
-                          width: 32,
-                          height: 32,
-                        ),
-                        Transform.translate(
-                          offset: const Offset(-5, -4),
-                          child: const _SafeAssetImage(
-                            path:
-                                'assets/images/homepage/basil_camera-solid.png',
-                            width: 12,
-                            height: 12,
-                          ),
-                        ),
-                        const SizedBox(width: 0),
-                        const Text(
-                          'Bắt đầu đo',
-                          style: TextStyle(
-                            color: Color(0xFF12355A),
-                            fontSize: 28,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ],
                     ),
                   ),
-                ),
-                const SizedBox(height: 14),
-                Text(
-                  'Theo dõi theo ngày',
-                  style: const TextStyle(
-                    color: Color(0xFF12355A),
-                    fontSize: 24,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
-                  decoration: BoxDecoration(
-                    gradient: const LinearGradient(
-                      begin: Alignment.centerLeft,
-                      end: Alignment.centerRight,
-                      colors: [Color(0xFFDFF5FF), Color(0xFF6BD0FF)],
-                    ),
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                  const SizedBox(height: 10),
+                  Row(
                     children: [
-                      Row(
-                        children: [
-                          Expanded(
+                      Expanded(
+                        child: SizedBox(
+                          height: 160,
+                          child: _HomeCard(
+                            trailing: Container(
+                              width: 52,
+                              height: 52,
+                              decoration: const BoxDecoration(
+                                color: Color(0xFF73D4C7),
+                                shape: BoxShape.circle,
+                              ),
+                              child: Center(
+                                child: Container(
+                                  width: 28,
+                                  height: 28,
+                                  decoration: const BoxDecoration(
+                                    color: Color(0xFFDDF2FB),
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                              ),
+                            ),
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 const Text(
-                                  'Ngày đang xem',
+                                  'Lượng đường đo gần nhất',
                                   style: TextStyle(
-                                    color: Color(0xFF5A7F99),
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF0B3159),
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w700,
                                   ),
                                 ),
-                                const SizedBox(height: 2),
+                                const SizedBox(height: 6),
+                                FittedBox(
+                                  fit: BoxFit.scaleDown,
+                                  alignment: Alignment.centerLeft,
+                                  child: Row(
+                                    crossAxisAlignment: CrossAxisAlignment.end,
+                                    children: [
+                                      Text(
+                                        latestGlucose,
+                                        style: const TextStyle(
+                                          color: Color(0xFF17324F),
+                                          fontSize: 34,
+                                          fontWeight: FontWeight.w500,
+                                          height: 1,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 4),
+                                      const Padding(
+                                        padding: EdgeInsets.only(bottom: 5),
+                                        child: Text(
+                                          'mg/dL',
+                                          style: TextStyle(
+                                            color: Color(0xFF17324F),
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
                                 Text(
-                                  _formatDayLabel(selectedDate),
+                                  '$latestMealContext\nVào lúc $latestRecordedAtLabel',
                                   style: const TextStyle(
-                                    color: Color(0xFF16395B),
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.w700,
+                                    color: Color(0xFF4F6780),
+                                    fontSize: 12,
+                                    height: 1.35,
                                   ),
                                 ),
                               ],
                             ),
                           ),
-                          InkWell(
-                            borderRadius: BorderRadius.circular(12),
-                            onTap: _pickSelectedDate,
-                            child: Container(
-                              padding: const EdgeInsets.all(10),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFD6ECF8),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: const Icon(
-                                Icons.calendar_month_outlined,
-                                color: Color(0xFF16395B),
-                                size: 22,
-                              ),
-                            ),
-                          ),
-                        ],
+                        ),
                       ),
-                      const SizedBox(height: 8),
-                      if (_selectedDateRecords.isEmpty)
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 14,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFD6ECF8),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: const Text(
-                            'Không có dữ liệu trong ngày này',
-                            style: TextStyle(
-                              color: Color(0xFF507089),
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        )
-                      else
-                        Column(
-                          children: _selectedDateRecords.map((record) {
-                            return Container(
-                              width: double.infinity,
-                              margin: const EdgeInsets.only(bottom: 8),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 12,
-                              ),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFD6ECF8),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Row(
-                                children: [
-                                  Expanded(
-                                    child: Text(
-                                      _formatTimeOnly(record.recordedAt),
-                                      style: const TextStyle(
-                                        color: Color(0xFF16395B),
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w700,
-                                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: SizedBox(
+                          height: 160,
+                          child: _HomeCard(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Đường huyết trong 24h qua',
+                                  style: TextStyle(
+                                    color: Color(0xFF0B3159),
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Expanded(
+                                  child: Center(
+                                    child: _Glucose24hGraph(
+                                      dataPoints: _glucose24hPoints,
                                     ),
                                   ),
-                                  Expanded(
-                                    flex: 2,
+                                ),
+                                Align(
+                                  alignment: Alignment.centerRight,
+                                  child: InkWell(
+                                    onTap: () {
+                                      Navigator.of(context).pushNamed(
+                                        AppRoutes.glucose24hDetail,
+                                        arguments: List<double>.from(
+                                          _glucose24hPoints,
+                                        ),
+                                      );
+                                    },
                                     child: Text(
-                                      _mealContextLabel(record.mealContext),
-                                      style: const TextStyle(
-                                        color: Color(0xFF4C718A),
-                                        fontSize: 13,
+                                      'Xem chi tiết →',
+                                      style: TextStyle(
+                                        color: AppColors.deepBlue,
+                                        fontSize: 12,
                                         fontWeight: FontWeight.w600,
                                       ),
                                     ),
                                   ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  _HomeCard(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Mục tiêu đường huyết',
+                          style: TextStyle(
+                            color: Color(0xFF0B3159),
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text.rich(
+                                  TextSpan(
+                                    children: [
+                                      TextSpan(
+                                        text: weeklyScoreText,
+                                        style: const TextStyle(
+                                          color: Color(0xFF17324F),
+                                          fontSize: 44,
+                                          fontWeight: FontWeight.w500,
+                                          height: 1,
+                                        ),
+                                      ),
+                                      const TextSpan(
+                                        text: '%',
+                                        style: TextStyle(
+                                          color: Color(0xFF17324F),
+                                          fontSize: 30,
+                                          fontWeight: FontWeight.w500,
+                                          height: 1,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                const Text(
+                                  'Mục tiêu tuần này:  40%',
+                                  style: TextStyle(
+                                    color: Color(0xFF4F6780),
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.end,
+                                children: [
+                                  SizedBox(
+                                    width: 74,
+                                    height: 74,
+                                    child: _AnimatedGoalHeart(
+                                      score: _weeklyComplianceScore,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
+                    ),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFF6FC8ED), Color(0xFF9BD9F4)],
+                      ),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x26000000),
+                          blurRadius: 7,
+                          offset: Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(14),
+                      onTap: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => QuickEntryPage(
+                              onGlucoseSaved: _refreshGlucoseData,
+                            ),
+                          ),
+                        );
+                      },
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const _SafeAssetImage(
+                            path: 'assets/images/homepage/Mascot Talk 1 1.png',
+                            width: 32,
+                            height: 32,
+                          ),
+                          Transform.translate(
+                            offset: const Offset(-5, -4),
+                            child: const _SafeAssetImage(
+                              path:
+                                  'assets/images/homepage/basil_camera-solid.png',
+                              width: 12,
+                              height: 12,
+                            ),
+                          ),
+                          const Text(
+                            'Bắt đầu đo',
+                            style: TextStyle(
+                              color: Color(0xFF12355A),
+                              fontSize: 28,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  const Text(
+                    'Theo dõi theo ngày',
+                    style: TextStyle(
+                      color: Color(0xFF12355A),
+                      fontSize: 24,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        begin: Alignment.centerLeft,
+                        end: Alignment.centerRight,
+                        colors: [Color(0xFFDFF5FF), Color(0xFF6BD0FF)],
+                      ),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text(
+                                    'Ngày đang xem',
+                                    style: TextStyle(
+                                      color: Color(0xFF5A7F99),
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
                                   Text(
-                                    '${_formatGlucoseValue(record.glucoseValue)} mg/dL',
+                                    _formatDayLabel(selectedDate),
                                     style: const TextStyle(
                                       color: Color(0xFF16395B),
-                                      fontSize: 13,
+                                      fontSize: 18,
                                       fontWeight: FontWeight.w700,
                                     ),
                                   ),
                                 ],
                               ),
-                            );
-                          }).toList(),
+                            ),
+                            InkWell(
+                              borderRadius: BorderRadius.circular(12),
+                              onTap: _pickSelectedDate,
+                              child: Container(
+                                padding: const EdgeInsets.all(10),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFD6ECF8),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: const Icon(
+                                  Icons.calendar_month_outlined,
+                                  color: Color(0xFF16395B),
+                                  size: 22,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
-                    ],
+                        const SizedBox(height: 8),
+                        if (_selectedDateRecords.isEmpty)
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 14,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFD6ECF8),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: const Text(
+                              'Không có dữ liệu trong ngày này',
+                              style: TextStyle(
+                                color: Color(0xFF507089),
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          )
+                        else
+                          Column(
+                            children: _selectedDateRecords.map((record) {
+                              return Container(
+                                width: double.infinity,
+                                margin: const EdgeInsets.only(bottom: 8),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 12,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFD6ECF8),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        _formatTimeOnly(record.recordedAt),
+                                        style: const TextStyle(
+                                          color: Color(0xFF16395B),
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ),
+                                    Expanded(
+                                      flex: 2,
+                                      child: Text(
+                                        _mealContextLabel(record.mealContext),
+                                        style: const TextStyle(
+                                          color: Color(0xFF4C718A),
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                    Text(
+                                      '${_formatGlucoseValue(record.glucoseValue)} mg/dL',
+                                      style: const TextStyle(
+                                        color: Color(0xFF16395B),
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -1388,35 +1401,59 @@ class _HomeBottomNav extends StatelessWidget {
   }
 }
 
-class _PlaceholderTab extends StatelessWidget {
-  const _PlaceholderTab({required this.title});
-
-  final String title;
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Text(
-        title,
-        style: const TextStyle(
-          color: AppColors.deepBlue,
-          fontSize: 22,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    );
-  }
-}
-
 class _AccountTab extends StatefulWidget {
-  const _AccountTab();
+  const _AccountTab({this.profile, required this.onProfileUpdated});
+
+  final UserProfileData? profile;
+  final ValueChanged<UserProfileData> onProfileUpdated;
 
   @override
   State<_AccountTab> createState() => _AccountTabState();
 }
 
 class _AccountTabState extends State<_AccountTab> {
+  final AccountSettingsService _accountSettingsService =
+      AccountSettingsService.instance;
+
   bool _isLoggingOut = false;
+  bool _isLoadingProfile = true;
+  bool _notificationsEnabled = true;
+  bool _remindersEnabled = true;
+  UserProfileData? _profile;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadSettingsState());
+  }
+
+  @override
+  void didUpdateWidget(covariant _AccountTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.profile != widget.profile) {
+      setState(() {
+        _profile = widget.profile;
+        _isLoadingProfile = false;
+      });
+    }
+  }
+
+  Future<void> _loadSettingsState() async {
+    final bool notificationsEnabled =
+        await _accountSettingsService.getNotificationsEnabled();
+    final bool remindersEnabled =
+        await _accountSettingsService.getRemindersEnabled();
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _notificationsEnabled = notificationsEnabled;
+      _remindersEnabled = remindersEnabled;
+      _profile = widget.profile;
+      _isLoadingProfile = false;
+    });
+  }
 
   Future<void> _logout() async {
     if (_isLoggingOut) {
@@ -1445,51 +1482,457 @@ class _AccountTabState extends State<_AccountTab> {
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              'Tài khoản',
-              style: TextStyle(
-                color: AppColors.deepBlue,
-                fontSize: 34,
-                fontWeight: FontWeight.w700,
+  Future<void> _confirmLogout() async {
+    if (_isLoggingOut) {
+      return;
+    }
+
+    final bool shouldLogout = await showDialog<bool>(
+          context: context,
+          builder: (BuildContext context) {
+            return AlertDialog(
+              title: const Text('Đăng xuất'),
+              content: const Text(
+                'Bạn có chắc muốn đăng xuất khỏi tài khoản này không?',
               ),
-            ),
-            const SizedBox(height: 24),
-            SizedBox(
-              width: 220,
-              child: ElevatedButton(
-                onPressed: _isLoggingOut ? null : _logout,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.primaryBlue,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
-                  ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  child: const Text('Ở lại'),
                 ),
-                child: _isLoggingOut
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: Colors.white,
-                        ),
-                      )
-                    : const Text(
-                        'Đăng xuất tạm thời',
-                        style: TextStyle(fontWeight: FontWeight.w700),
-                      ),
-              ),
+                ElevatedButton(
+                  onPressed: () => Navigator.of(context).pop(true),
+                  child: const Text('Đăng xuất'),
+                ),
+              ],
+            );
+          },
+        ) ??
+        false;
+
+    if (!shouldLogout) {
+      return;
+    }
+
+    await _logout();
+  }
+
+  Future<void> _openPhoneSettings() async {
+    await openAppSettings();
+  }
+
+  Future<void> _setNotificationsEnabled(bool value) async {
+    setState(() {
+      _notificationsEnabled = value;
+    });
+    await _accountSettingsService.setNotificationsEnabled(value);
+  }
+
+  Future<void> _setRemindersEnabled(bool value) async {
+    setState(() {
+      _remindersEnabled = value;
+    });
+    await _accountSettingsService.setRemindersEnabled(value);
+  }
+
+  Future<void> _openEditProfilePage() async {
+    final UserProfileData seedProfile = _profile ??
+        const UserProfileData(
+          id: '',
+          phoneNumber: '',
+          role: 'PATIENT',
+          fullName: '',
+        );
+
+    final UserProfileData? updatedProfile = await Navigator.of(context).push<
+        UserProfileData>(
+      MaterialPageRoute<UserProfileData>(
+        builder: (_) => _EditAccountProfilePage(initialProfile: seedProfile),
+      ),
+    );
+    if (!mounted || updatedProfile == null) {
+      return;
+    }
+
+    await _accountSettingsService.saveProfileOverrides(
+      fullName: updatedProfile.fullName,
+      email: updatedProfile.email,
+    );
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _profile = updatedProfile;
+    });
+    widget.onProfileUpdated(updatedProfile);
+  }
+
+  Future<void> _showInfoDialog({
+    required String title,
+    required String message,
+  }) async {
+    if (!mounted) {
+      return;
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text(title),
+          content: Text(message),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Đóng'),
             ),
           ],
+        );
+      },
+    );
+  }
+
+  String _roleLabel(String? role) {
+    switch ((role ?? '').toUpperCase()) {
+      case 'PATIENT':
+        return 'Bệnh nhân';
+      case 'DOCTOR':
+        return 'Bác sĩ';
+      case 'ADMIN':
+        return 'Quản trị viên';
+      default:
+        return 'Người dùng';
+    }
+  }
+
+  String _initials(String name) {
+    final List<String> parts = name
+        .split(RegExp(r'\s+'))
+        .where((String part) => part.trim().isNotEmpty)
+        .toList();
+    if (parts.isEmpty) {
+      return 'GC';
+    }
+    if (parts.length == 1) {
+      return parts.first.substring(0, parts.first.length.clamp(0, 2)).toUpperCase();
+    }
+    return (parts.first.characters.first + parts.last.characters.first)
+        .toUpperCase();
+  }
+
+  Widget _buildSectionCard({required List<Widget> children}) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x14000000),
+            blurRadius: 16,
+            offset: Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Column(children: children),
+    );
+  }
+
+  Widget _buildMenuTile({
+    required IconData icon,
+    required String title,
+    String? subtitle,
+    VoidCallback? onTap,
+    Widget? trailing,
+    Color iconBackground = const Color(0xFFDCEFFC),
+    Color iconColor = const Color(0xFF1E5C92),
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        child: Row(
+          children: [
+            Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(
+                color: iconBackground,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(icon, color: iconColor, size: 22),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      color: Color(0xFF18354F),
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  if ((subtitle ?? '').trim().isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 3),
+                      child: Text(
+                        subtitle!,
+                        style: const TextStyle(
+                          color: Color(0xFF658196),
+                          fontSize: 12,
+                          height: 1.35,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            trailing ??
+                const Icon(
+                  Icons.chevron_right_rounded,
+                  color: Color(0xFF6E8799),
+                ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final String fullName = (_profile?.fullName ?? '').trim().isEmpty
+        ? 'Người dùng GluCare'
+        : _profile!.fullName.trim();
+    final String phoneNumber = (_profile?.phoneNumber ?? '').trim();
+    final String email = (_profile?.email ?? '').trim();
+    final String roleLabel = _roleLabel(_profile?.role);
+
+    return Container(
+      color: const Color(0xFFDDF2FB),
+      child: SafeArea(
+        bottom: false,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(18, 18, 18, 110),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Tài khoản',
+                style: TextStyle(
+                  color: AppColors.deepBlue,
+                  fontSize: 30,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [Color(0xFF1564A6), Color(0xFF07173A)],
+                  ),
+                  borderRadius: BorderRadius.circular(22),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x22000000),
+                      blurRadius: 18,
+                      offset: Offset(0, 10),
+                    ),
+                  ],
+                ),
+                child: _isLoadingProfile
+                    ? const SizedBox(
+                        height: 112,
+                        child: Center(
+                          child: CircularProgressIndicator(color: Colors.white),
+                        ),
+                      )
+                    : Row(
+                        children: [
+                          CircleAvatar(
+                            radius: 33,
+                            backgroundColor: const Color(0xFFDFF5FF),
+                            child: Text(
+                              _initials(fullName),
+                              style: const TextStyle(
+                                color: Color(0xFF0E4777),
+                                fontSize: 24,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  fullName,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.w800,
+                                    height: 1.1,
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Text(
+                                  roleLabel,
+                                  style: const TextStyle(
+                                    color: Color(0xFFD0E9FA),
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                if (phoneNumber.isNotEmpty) ...[
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    phoneNumber,
+                                    style: const TextStyle(
+                                      color: Color(0xFFDFF3FF),
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ],
+                                if (email.isNotEmpty) ...[
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    email,
+                                    style: const TextStyle(
+                                      color: Color(0xFFDFF3FF),
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+              ),
+              const SizedBox(height: 18),
+              _buildSectionCard(
+                children: [
+                  _buildMenuTile(
+                    icon: Icons.badge_outlined,
+                    title: 'Thông tin cá nhân',
+                    subtitle: 'Chỉnh sửa tên hiển thị và email trên thiết bị',
+                    onTap: () {
+                      unawaited(_openEditProfilePage());
+                    },
+                  ),
+                  const Divider(height: 1, color: Color(0xFFE2EDF3)),
+                  _buildMenuTile(
+                    icon: Icons.lock_outline_rounded,
+                    title: 'Bảo mật tài khoản',
+                    subtitle: 'Quản lý đăng nhập và quyền riêng tư',
+                    onTap: () {
+                      unawaited(
+                        _showInfoDialog(
+                          title: 'Bảo mật tài khoản',
+                          message:
+                              'Đã kiểm tra API hiện có: app đọc profile qua /v1/auth/me, nhưng chưa có endpoint cập nhật hồ sơ hoặc đổi mật khẩu được tài liệu hóa cho màn hình này. Vì vậy phần chỉnh sửa hồ sơ hiện được lưu cục bộ trên thiết bị.',
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              _buildSectionCard(
+                children: [
+                  _buildMenuTile(
+                    icon: Icons.notifications_none_rounded,
+                    title: 'Thông báo',
+                    subtitle: 'Nhận nhắc nhở và cập nhật quan trọng',
+                    trailing: Switch.adaptive(
+                      value: _notificationsEnabled,
+                      onChanged: (bool value) {
+                        unawaited(_setNotificationsEnabled(value));
+                      },
+                    ),
+                  ),
+                  const Divider(height: 1, color: Color(0xFFE2EDF3)),
+                  _buildMenuTile(
+                    icon: Icons.alarm_rounded,
+                    title: 'Nhắc lịch theo dõi',
+                    subtitle: 'Bật nhắc đo đường huyết và uống thuốc',
+                    trailing: Switch.adaptive(
+                      value: _remindersEnabled,
+                      onChanged: (bool value) {
+                        unawaited(_setRemindersEnabled(value));
+                      },
+                    ),
+                  ),
+                  const Divider(height: 1, color: Color(0xFFE2EDF3)),
+                  _buildMenuTile(
+                    icon: Icons.settings_suggest_outlined,
+                    title: 'Cài đặt ứng dụng',
+                    subtitle: 'Mở cài đặt hệ thống cho ứng dụng này',
+                    onTap: () {
+                      unawaited(_openPhoneSettings());
+                    },
+                  ),
+                  const Divider(height: 1, color: Color(0xFFE2EDF3)),
+                  _buildMenuTile(
+                    icon: Icons.help_outline_rounded,
+                    title: 'Trợ giúp',
+                    subtitle: 'Hướng dẫn sử dụng và hỗ trợ',
+                    onTap: () {
+                      unawaited(
+                        _showInfoDialog(
+                          title: 'Trợ giúp',
+                          message:
+                              'Nếu có vấn đề với dữ liệu hoặc tài khoản, bạn có thể đăng xuất và đăng nhập lại hoặc liên hệ nhóm hỗ trợ của dự án.',
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _isLoggingOut ? null : _confirmLogout,
+                  icon: _isLoggingOut
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Icon(Icons.logout_rounded),
+                  label: Text(
+                    _isLoggingOut ? 'Đang đăng xuất...' : 'Đăng xuất',
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF12355A),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 15),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1529,6 +1972,199 @@ class _SafeAssetImage extends StatelessWidget {
             Icons.image_not_supported_outlined,
             color: AppColors.mutedBlue,
             size: 18,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _EditAccountProfilePage extends StatefulWidget {
+  const _EditAccountProfilePage({required this.initialProfile});
+
+  final UserProfileData initialProfile;
+
+  @override
+  State<_EditAccountProfilePage> createState() => _EditAccountProfilePageState();
+}
+
+class _EditAccountProfilePageState extends State<_EditAccountProfilePage> {
+  late final TextEditingController _nameController;
+  late final TextEditingController _emailController;
+  bool _isSaving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameController = TextEditingController(text: widget.initialProfile.fullName);
+    _emailController = TextEditingController(
+      text: widget.initialProfile.email ?? '',
+    );
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _emailController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _saveProfile() async {
+    final String fullName = _nameController.text.trim();
+    final String email = _emailController.text.trim();
+    if (fullName.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _isSaving = true;
+    });
+
+    if (!mounted) {
+      return;
+    }
+
+    Navigator.of(context).pop(
+      widget.initialProfile.copyWith(
+        fullName: fullName,
+        email: email.isEmpty ? null : email,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFDDF2FB),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF1564A6),
+        foregroundColor: Colors.white,
+        title: const Text('Chỉnh sửa hồ sơ'),
+      ),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child: const Text(
+                  'Đã kiểm tra API: hiện có thể đọc hồ sơ qua /v1/auth/me nhưng chưa có endpoint cập nhật hồ sơ cho màn hình này. Các thay đổi bên dưới sẽ được lưu cục bộ trên thiết bị và áp dụng cho Trang chủ cùng mục Tài khoản.',
+                  style: TextStyle(
+                    color: Color(0xFF305167),
+                    fontSize: 13,
+                    height: 1.45,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 18),
+              const Text(
+                'Họ và tên',
+                style: TextStyle(
+                  color: Color(0xFF17324F),
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _nameController,
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: Colors.white,
+                  hintText: 'Nhập tên hiển thị',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Email',
+                style: TextStyle(
+                  color: Color(0xFF17324F),
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: _emailController,
+                keyboardType: TextInputType.emailAddress,
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: Colors.white,
+                  hintText: 'you@example.com',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(14),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Số điện thoại',
+                style: TextStyle(
+                  color: Color(0xFF17324F),
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFEAF3F8),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Text(
+                  widget.initialProfile.phoneNumber.trim().isEmpty
+                      ? 'Chưa cập nhật'
+                      : widget.initialProfile.phoneNumber,
+                  style: const TextStyle(
+                    color: Color(0xFF4A6679),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: _isSaving ? null : _saveProfile,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF12355A),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 15),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                  child: _isSaving
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Text(
+                          'Lưu thay đổi',
+                          style: TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                ),
+              ),
+            ],
           ),
         ),
       ),

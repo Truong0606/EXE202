@@ -128,14 +128,13 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
       final String dateOfBirth =
           '${selectedBirthDate!.year.toString().padLeft(4, '0')}-${selectedBirthDate!.month.toString().padLeft(2, '0')}-${selectedBirthDate!.day.toString().padLeft(2, '0')}';
 
-      final Map<String, dynamic> response = await _backendApiService
-          .registerPatient(
-            phoneNumber: phoneNumber,
-            password: password,
-            fullName: fullName,
-            gender: gender,
-            dateOfBirth: dateOfBirth,
-          );
+      await _backendApiService.registerPatient(
+        phoneNumber: phoneNumber,
+        password: password,
+        fullName: fullName,
+        gender: gender,
+        dateOfBirth: dateOfBirth,
+      );
 
       if (!mounted) {
         return;

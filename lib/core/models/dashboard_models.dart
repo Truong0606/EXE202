@@ -1,5 +1,6 @@
 class BlogArticleData {
   const BlogArticleData({
+    required this.id,
     required this.title,
     required this.publishedInfo,
     required this.summary,
@@ -7,6 +8,7 @@ class BlogArticleData {
     this.imageUrl,
   });
 
+  final String id;
   final String title;
   final String publishedInfo;
   final String summary;
@@ -15,20 +17,64 @@ class BlogArticleData {
 
   factory BlogArticleData.fromJson(Map<String, dynamic> json) {
     final dynamic bodyRaw =
-        json['body'] ?? json['content'] ?? json['paragraphs'];
-    final List<String> paragraphs = bodyRaw is List
-        ? bodyRaw.map((dynamic item) => item.toString()).toList()
-        : <String>[];
+      json['body'] ?? json['content'] ?? json['paragraphs'];
+    final List<String> paragraphs;
+    if (bodyRaw is List) {
+      paragraphs = bodyRaw.map((dynamic item) => item.toString()).toList();
+    } else if (bodyRaw is String) {
+      final String normalized = bodyRaw
+        .replaceAll(RegExp(r'<[^>]+>'), ' ')
+        .replaceAll('&nbsp;', ' ')
+        .replaceAll('&amp;', '&')
+        .replaceAll('&quot;', '"')
+        .replaceAll('&#39;', "'");
+      paragraphs = normalized
+        .split(RegExp(r'\n\s*\n|\r\n\s*\r\n'))
+        .map((String part) => part.replaceAll(RegExp(r'\s+'), ' ').trim())
+        .where((String part) => part.isNotEmpty)
+        .toList();
+    } else {
+      paragraphs = <String>[];
+    }
+
+    final String summary = (json['summary'] ??
+        json['description'] ??
+        json['excerpt'] ??
+        json['shortDescription'] ??
+        '')
+      .toString()
+      .trim();
+    final String fallbackSummary = paragraphs.isEmpty
+      ? ''
+      : paragraphs.first.length > 180
+        ? '${paragraphs.first.substring(0, 180).trim()}...'
+        : paragraphs.first;
 
     return BlogArticleData(
+      id: (json['id'] ?? json['_id'] ?? '').toString(),
       title: (json['title'] ?? '').toString(),
-      publishedInfo: (json['publishedInfo'] ?? json['published_at'] ?? '')
+      publishedInfo:
+        (json['publishedInfo'] ??
+            json['published_at'] ??
+            json['publishedAt'] ??
+            json['createdAt'] ??
+            '')
           .toString(),
-      summary: (json['summary'] ?? json['description'] ?? '').toString(),
+      summary: summary.isEmpty ? fallbackSummary : summary,
       body: paragraphs,
-      imageUrl: (json['imageUrl'] ?? json['image_url'] ?? '').toString().isEmpty
-          ? null
-          : (json['imageUrl'] ?? json['image_url']).toString(),
+      imageUrl: (json['imageUrl'] ??
+            json['image_url'] ??
+            json['thumbnailUrl'] ??
+            json['thumbnail_url'] ??
+            '')
+          .toString()
+          .isEmpty
+        ? null
+        : (json['imageUrl'] ??
+            json['image_url'] ??
+            json['thumbnailUrl'] ??
+            json['thumbnail_url'])
+          .toString(),
     );
   }
 }
@@ -76,6 +122,26 @@ class UserProfileData {
   final String? email;
   final String? avatarUrl;
   final String? status;
+
+  UserProfileData copyWith({
+    String? id,
+    String? phoneNumber,
+    String? role,
+    String? fullName,
+    String? email,
+    String? avatarUrl,
+    String? status,
+  }) {
+    return UserProfileData(
+      id: id ?? this.id,
+      phoneNumber: phoneNumber ?? this.phoneNumber,
+      role: role ?? this.role,
+      fullName: fullName ?? this.fullName,
+      email: email ?? this.email,
+      avatarUrl: avatarUrl ?? this.avatarUrl,
+      status: status ?? this.status,
+    );
+  }
 
   factory UserProfileData.fromJson(Map<String, dynamic> json) {
     return UserProfileData(
