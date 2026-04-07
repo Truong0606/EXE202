@@ -19,10 +19,7 @@ class LoginPrototypePage extends StatelessWidget {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const GluCareBrandHeader(
-                  logoWidth: 190,
-                  textWidth: 140,
-                ),
+                const GluCareBrandHeader(logoWidth: 190, textWidth: 140),
                 const SizedBox(height: 28),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
@@ -49,6 +46,20 @@ class LoginPrototypePage extends StatelessWidget {
                       child: const Text('Đăng ký'),
                     ),
                   ],
+                ),
+                const SizedBox(height: 18),
+                TextButton(
+                  onPressed: () {
+                    Navigator.of(context).pushNamed(AppRoutes.forgotPassword);
+                  },
+                  child: const Text(
+                    'Quên mật khẩu?',
+                    style: TextStyle(
+                      color: AppColors.primaryBlue,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
                 ),
               ],
             ),

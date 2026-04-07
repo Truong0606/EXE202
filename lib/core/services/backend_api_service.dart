@@ -70,6 +70,30 @@ class BackendApiService {
     throw Exception(message);
   }
 
+  Future<void> forgotPassword({
+    required String phoneNumber,
+    required String newPassword,
+  }) async {
+    final Uri uri = Uri.parse('$_baseUrl/v1/auth/forgot-password');
+    final http.Response response = await http.post(
+      uri,
+      headers: <String, String>{'Content-Type': 'application/json'},
+      body: jsonEncode(<String, dynamic>{
+        'phoneNumber': phoneNumber,
+        'newPassword': newPassword,
+      }),
+    );
+
+    final Map<String, dynamic> body = _safeDecodeMap(response.body);
+    if (response.statusCode == 200) {
+      return;
+    }
+
+    final String message = (body['message'] ?? 'Không thể đặt lại mật khẩu')
+        .toString();
+    throw Exception(message);
+  }
+
   Future<Map<String, dynamic>> createGlucoseReading({
     required double glucoseValue,
     required String mealContext,
@@ -80,10 +104,7 @@ class BackendApiService {
     final Map<String, String> headers = await _authorizedHeaders();
     final http.Response response = await http.post(
       uri,
-      headers: <String, String>{
-        ...headers,
-        'Content-Type': 'application/json',
-      },
+      headers: <String, String>{...headers, 'Content-Type': 'application/json'},
       body: jsonEncode(<String, dynamic>{
         'glucoseValue': glucoseValue,
         'readingType': readingType,
@@ -113,10 +134,7 @@ class BackendApiService {
     final Map<String, String> headers = await _authorizedHeaders();
     final http.Response response = await http.post(
       uri,
-      headers: <String, String>{
-        ...headers,
-        'Content-Type': 'application/json',
-      },
+      headers: <String, String>{...headers, 'Content-Type': 'application/json'},
       body: jsonEncode(<String, dynamic>{
         'foodName': foodName,
         'mealType': mealType,
@@ -131,8 +149,8 @@ class BackendApiService {
       return body;
     }
 
-    final String message =
-        (body['message'] ?? 'Không thể ghi nhận bữa ăn').toString();
+    final String message = (body['message'] ?? 'Không thể ghi nhận bữa ăn')
+        .toString();
     throw Exception(message);
   }
 
@@ -146,10 +164,7 @@ class BackendApiService {
     final Map<String, String> headers = await _authorizedHeaders();
     final http.Response response = await http.post(
       uri,
-      headers: <String, String>{
-        ...headers,
-        'Content-Type': 'application/json',
-      },
+      headers: <String, String>{...headers, 'Content-Type': 'application/json'},
       body: jsonEncode(<String, dynamic>{
         'medicineName': medicineName,
         'dosage': dosage,
@@ -163,8 +178,8 @@ class BackendApiService {
       return body;
     }
 
-    final String message =
-        (body['message'] ?? 'Không thể ghi nhận uống thuốc').toString();
+    final String message = (body['message'] ?? 'Không thể ghi nhận uống thuốc')
+        .toString();
     throw Exception(message);
   }
 
@@ -173,9 +188,7 @@ class BackendApiService {
     int limit = 20,
     String language = 'VI',
   }) async {
-    final Uri uri = Uri.parse(
-      '$_baseUrl/v1/patient/articles',
-    ).replace(
+    final Uri uri = Uri.parse('$_baseUrl/v1/patient/articles').replace(
       queryParameters: <String, String>{
         'page': '$page',
         'limit': '$limit',
@@ -189,8 +202,8 @@ class BackendApiService {
 
     final Map<String, dynamic> body = _safeDecodeMap(response.body);
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      final String message =
-          (body['message'] ?? 'Không thể tải bài viết').toString();
+      final String message = (body['message'] ?? 'Không thể tải bài viết')
+          .toString();
       throw Exception(message);
     }
 
@@ -237,7 +250,9 @@ class BackendApiService {
       return articleSummary;
     }
 
-    final BlogArticleData? articleDetail = await fetchBlogArticleDetail(articleId);
+    final BlogArticleData? articleDetail = await fetchBlogArticleDetail(
+      articleId,
+    );
     if (articleDetail == null) {
       return articleSummary;
     }
@@ -276,7 +291,8 @@ class BackendApiService {
   }
 
   Future<UserProfileData?> fetchCurrentUserProfile() async {
-    final Map<String, dynamic>? response = await _getJson('/v1/auth/me');
+    final Map<String, dynamic>? response =
+        await _getJson('/v1/profile') ?? await _getJson('/v1/auth/me');
     if (response == null) {
       return null;
     }
@@ -287,6 +303,191 @@ class BackendApiService {
     }
 
     return UserProfileData.fromJson(data);
+  }
+
+  Future<UserProfileData?> updateCurrentUserProfile({
+    required String fullName,
+    String? gender,
+    String? dateOfBirth,
+    String? specialization,
+    String? hospital,
+  }) async {
+    final Uri uri = Uri.parse('$_baseUrl/v1/profile');
+    final http.Response response = await http.patch(
+      uri,
+      headers: <String, String>{
+        ...await _authorizedHeaders(),
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(<String, dynamic>{
+        'fullName': fullName,
+        if ((gender ?? '').trim().isNotEmpty) 'gender': gender,
+        if ((dateOfBirth ?? '').trim().isNotEmpty) 'dateOfBirth': dateOfBirth,
+        if ((specialization ?? '').trim().isNotEmpty)
+          'specialization': specialization,
+        if ((hospital ?? '').trim().isNotEmpty) 'hospital': hospital,
+      }),
+    );
+
+    final Map<String, dynamic> body = _safeDecodeMap(response.body);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final String message = (body['message'] ?? 'Không thể cập nhật hồ sơ')
+          .toString();
+      throw Exception(message);
+    }
+
+    final Map<String, dynamic> data = _extractDataMap(body);
+    if (data.isEmpty) {
+      return fetchCurrentUserProfile();
+    }
+    return UserProfileData.fromJson(data);
+  }
+
+  Future<UserProfileData?> uploadProfileAvatar(File avatarFile) async {
+    final Uri uri = Uri.parse('$_baseUrl/v1/profile/avatar');
+    final http.MultipartRequest request = http.MultipartRequest('POST', uri)
+      ..headers.addAll(await _authorizedHeaders());
+
+    final String? mimeType = lookupMimeType(avatarFile.path);
+    MediaType? contentType;
+    if ((mimeType ?? '').contains('/')) {
+      final List<String> parts = mimeType!.split('/');
+      if (parts.length == 2) {
+        contentType = MediaType(parts[0], parts[1]);
+      }
+    }
+
+    request.files.add(
+      await http.MultipartFile.fromPath(
+        'avatar',
+        avatarFile.path,
+        contentType: contentType,
+      ),
+    );
+
+    final http.Response response = await http.Response.fromStream(
+      await request.send(),
+    );
+    final Map<String, dynamic> body = _safeDecodeMap(response.body);
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final String message = (body['message'] ?? 'Không thể tải ảnh đại diện')
+          .toString();
+      throw Exception(message);
+    }
+
+    final Map<String, dynamic> data = _extractDataMap(body);
+    if (data.isNotEmpty) {
+      return UserProfileData.fromJson(data);
+    }
+
+    return fetchCurrentUserProfile();
+  }
+
+  Future<PaymentInitiationData> initiatePayment({
+    required String userId,
+    required String packageType,
+  }) async {
+    final Uri uri = Uri.parse('$_baseUrl/v1/payments/initiate');
+    final http.Response response = await http.post(
+      uri,
+      headers: <String, String>{
+        ...await _authorizedHeaders(),
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(<String, dynamic>{
+        'userId': userId,
+        'packageType': packageType,
+      }),
+    );
+
+    final Map<String, dynamic> body = _safeDecodeMap(response.body);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final String message =
+          (body['message'] ?? 'Không thể khởi tạo thanh toán').toString();
+      throw Exception(message);
+    }
+
+    final Map<String, dynamic> data = _extractDataMap(body);
+    final PaymentInitiationData result = PaymentInitiationData.fromJson(
+      data.isEmpty ? body : data,
+    );
+    if (result.paymentUrl.trim().isEmpty) {
+      throw Exception('API chưa trả về liên kết thanh toán hợp lệ');
+    }
+    return result;
+  }
+
+  Future<List<PaymentHistoryItemData>> fetchPaymentHistory({
+    int page = 1,
+    int limit = 20,
+    String? status,
+  }) async {
+    final Map<String, String> query = <String, String>{
+      'page': '$page',
+      'limit': '$limit',
+      if ((status ?? '').trim().isNotEmpty) 'status': status!.trim(),
+    };
+    final Uri uri = Uri.parse(
+      '$_baseUrl/v1/payments/history',
+    ).replace(queryParameters: query);
+    final http.Response response = await http.get(
+      uri,
+      headers: await _authorizedHeaders(),
+    );
+
+    final Map<String, dynamic> body = _safeDecodeMap(response.body);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final String message =
+          (body['message'] ?? 'Không thể tải lịch sử thanh toán').toString();
+      throw Exception(message);
+    }
+
+    final List<Map<String, dynamic>> items = _extractDataList(body);
+    final List<PaymentHistoryItemData> history = items
+        .map(PaymentHistoryItemData.fromJson)
+        .where(
+          (PaymentHistoryItemData item) =>
+              item.id.isNotEmpty || item.packageType.isNotEmpty,
+        )
+        .toList();
+
+    history.sort((PaymentHistoryItemData first, PaymentHistoryItemData second) {
+      final DateTime firstDate =
+          first.createdAt ??
+          first.paidAt ??
+          DateTime.fromMillisecondsSinceEpoch(0);
+      final DateTime secondDate =
+          second.createdAt ??
+          second.paidAt ??
+          DateTime.fromMillisecondsSinceEpoch(0);
+      return secondDate.compareTo(firstDate);
+    });
+    return history;
+  }
+
+  Future<void> cancelPendingPayment({String? transactionId}) async {
+    final Uri uri = Uri.parse('$_baseUrl/v1/payments/cancel');
+    final Map<String, dynamic> payload = <String, dynamic>{
+      if ((transactionId ?? '').trim().isNotEmpty)
+        'transactionId': transactionId!.trim(),
+    };
+
+    final http.Response response = await http.post(
+      uri,
+      headers: <String, String>{
+        ...await _authorizedHeaders(),
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(payload),
+    );
+
+    final Map<String, dynamic> body = _safeDecodeMap(response.body);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final String message = (body['message'] ?? 'Không thể hủy giao dịch chờ')
+          .toString();
+      throw Exception(message);
+    }
   }
 
   Future<List<GlucoseHistoryItemData>> fetchGlucoseHistory({
@@ -336,33 +537,35 @@ class BackendApiService {
     final DateTime target = DateTime(date.year, date.month, date.day);
     final DateTime nextDay = target.add(const Duration(days: 1));
 
-    final List<GlucoseHistoryItemData> filteredRecords = await fetchGlucoseHistory(
-      page: 1,
-      limit: 10,
-      startDate: target,
-      endDate: nextDay,
-    );
+    final List<GlucoseHistoryItemData> filteredRecords =
+        await fetchGlucoseHistory(
+          page: 1,
+          limit: 10,
+          startDate: target,
+          endDate: nextDay,
+        );
 
-    final List<GlucoseHistoryItemData> unfilteredRecords = await fetchGlucoseHistory(
-      page: 1,
-      limit: 10,
-    );
+    final List<GlucoseHistoryItemData> unfilteredRecords =
+        await fetchGlucoseHistory(page: 1, limit: 10);
 
     final Map<String, GlucoseHistoryItemData> mergedById =
         <String, GlucoseHistoryItemData>{
-          for (final GlucoseHistoryItemData item in filteredRecords) item.id: item,
-          for (final GlucoseHistoryItemData item in unfilteredRecords) item.id: item,
+          for (final GlucoseHistoryItemData item in filteredRecords)
+            item.id: item,
+          for (final GlucoseHistoryItemData item in unfilteredRecords)
+            item.id: item,
         };
 
     final List<GlucoseHistoryItemData> records = mergedById.values.where((
       GlucoseHistoryItemData item,
     ) {
       final DateTime recordedLocal = item.recordedAt.toLocal();
-      final bool inRecordedRange = !recordedLocal.isBefore(target) &&
-          recordedLocal.isBefore(nextDay);
+      final bool inRecordedRange =
+          !recordedLocal.isBefore(target) && recordedLocal.isBefore(nextDay);
 
       final DateTime? createdLocal = item.createdAt?.toLocal();
-      final bool inCreatedRange = createdLocal != null &&
+      final bool inCreatedRange =
+          createdLocal != null &&
           !createdLocal.isBefore(target) &&
           createdLocal.isBefore(nextDay);
 
@@ -386,7 +589,9 @@ class BackendApiService {
     );
 
     final List<GlucoseHistoryItemData> filtered = records
-        .where((GlucoseHistoryItemData item) => item.recordedAt.isAfter(threshold))
+        .where(
+          (GlucoseHistoryItemData item) => item.recordedAt.isAfter(threshold),
+        )
         .toList();
     filtered.sort(
       (GlucoseHistoryItemData a, GlucoseHistoryItemData b) =>
@@ -492,7 +697,9 @@ class BackendApiService {
     }
 
     final http.StreamedResponse streamedResponse = await request.send();
-    final http.Response response = await http.Response.fromStream(streamedResponse);
+    final http.Response response = await http.Response.fromStream(
+      streamedResponse,
+    );
     final Map<String, dynamic> body = _safeDecodeMap(response.body);
 
     if (response.statusCode == 200 || response.statusCode == 201) {
@@ -500,7 +707,8 @@ class BackendApiService {
       return AiChatResultData.fromJson(data);
     }
 
-    final String messageText = (body['message'] ?? 'Không thể gửi tin nhắn tới AI').toString();
+    final String messageText =
+        (body['message'] ?? 'Không thể gửi tin nhắn tới AI').toString();
     throw Exception(messageText);
   }
 
@@ -512,9 +720,14 @@ class BackendApiService {
         .where((AiChatSessionSummaryData item) => item.id.isNotEmpty)
         .toList();
 
-    sessions.sort((AiChatSessionSummaryData first, AiChatSessionSummaryData second) {
-      final DateTime firstUpdated = first.updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
-      final DateTime secondUpdated = second.updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+    sessions.sort((
+      AiChatSessionSummaryData first,
+      AiChatSessionSummaryData second,
+    ) {
+      final DateTime firstUpdated =
+          first.updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final DateTime secondUpdated =
+          second.updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
       return secondUpdated.compareTo(firstUpdated);
     });
     return sessions;
@@ -540,12 +753,17 @@ class BackendApiService {
     final List<Map<String, dynamic>> items = _extractDataList(payload);
     final List<AiChatMessageData> messages = items
         .map(AiChatMessageData.fromJson)
-        .where((AiChatMessageData item) => item.text.isNotEmpty || item.attachmentName != null)
+        .where(
+          (AiChatMessageData item) =>
+              item.text.isNotEmpty || item.attachmentName != null,
+        )
         .toList();
 
     messages.sort((AiChatMessageData first, AiChatMessageData second) {
-      final DateTime firstCreated = first.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0);
-      final DateTime secondCreated = second.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final DateTime firstCreated =
+          first.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final DateTime secondCreated =
+          second.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0);
       return firstCreated.compareTo(secondCreated);
     });
     return messages;
@@ -589,8 +807,8 @@ class BackendApiService {
     }
 
     final Map<String, dynamic> body = _safeDecodeMap(response.body);
-    final String message =
-        (body['message'] ?? 'Không thể xóa cuộc trò chuyện').toString();
+    final String message = (body['message'] ?? 'Không thể xóa cuộc trò chuyện')
+        .toString();
     throw Exception(message);
   }
 
@@ -636,14 +854,28 @@ class BackendApiService {
       }
       if (data is Map<String, dynamic>) {
         final dynamic nestedList =
-            data['items'] ?? data['list'] ?? data['results'] ?? data['messages'] ?? data['sessions'];
+            data['items'] ??
+            data['list'] ??
+            data['results'] ??
+            data['history'] ??
+            data['messages'] ??
+            data['sessions'] ??
+            data['payments'] ??
+            data['transactions'];
         if (nestedList is List) {
           return nestedList.whereType<Map<String, dynamic>>().toList();
         }
       }
 
       final dynamic directList =
-          payload['items'] ?? payload['list'] ?? payload['results'] ?? payload['messages'] ?? payload['sessions'];
+          payload['items'] ??
+          payload['list'] ??
+          payload['results'] ??
+          payload['history'] ??
+          payload['messages'] ??
+          payload['sessions'] ??
+          payload['payments'] ??
+          payload['transactions'];
       if (directList is List) {
         return directList.whereType<Map<String, dynamic>>().toList();
       }
@@ -729,10 +961,13 @@ class AiChatResultData {
 
     final Map<String, dynamic>? result = asMap(json['result']);
     final Map<String, dynamic>? message = asMap(json['message']);
-    final Map<String, dynamic>? assistantMessage = asMap(json['assistantMessage']);
+    final Map<String, dynamic>? assistantMessage = asMap(
+      json['assistantMessage'],
+    );
     final Map<String, dynamic>? response = asMap(json['response']);
 
-    final String reply = firstNonEmptyString(<dynamic>[
+    final String reply =
+        firstNonEmptyString(<dynamic>[
           json['reply'],
           json['responseText'],
           json['assistantReply'],
@@ -762,11 +997,7 @@ class AiChatResultData {
       response?['sessionId'],
     ]);
 
-    return AiChatResultData(
-      reply: reply,
-      sessionId: sessionId,
-      rawData: json,
-    );
+    return AiChatResultData(reply: reply, sessionId: sessionId, rawData: json);
   }
 }
 
@@ -784,17 +1015,30 @@ class AiChatSessionSummaryData {
   final String? preview;
 
   factory AiChatSessionSummaryData.fromJson(Map<String, dynamic> json) {
-    final String id = _readFirstString(json, <String>['id', 'sessionId', 'threadId']);
-    final String title = _readFirstString(
-      json,
-      <String>['title', 'name', 'sessionTitle'],
-      fallback: 'Cuộc trò chuyện',
-    );
+    final String id = _readFirstString(json, <String>[
+      'id',
+      'sessionId',
+      'threadId',
+    ]);
+    final String title = _readFirstString(json, <String>[
+      'title',
+      'name',
+      'sessionTitle',
+    ], fallback: 'Cuộc trò chuyện');
     return AiChatSessionSummaryData(
       id: id,
       title: title,
-      updatedAt: _readFirstDateTime(json, <String>['updatedAt', 'lastMessageAt', 'createdAt']),
-      preview: _readNullableString(json, <String>['preview', 'lastMessage', 'content', 'message']),
+      updatedAt: _readFirstDateTime(json, <String>[
+        'updatedAt',
+        'lastMessageAt',
+        'createdAt',
+      ]),
+      preview: _readNullableString(json, <String>[
+        'preview',
+        'lastMessage',
+        'content',
+        'message',
+      ]),
     );
   }
 }
@@ -815,32 +1059,47 @@ class AiChatMessageData {
   final String? disclaimer;
 
   factory AiChatMessageData.fromJson(Map<String, dynamic> json) {
-    final String role = _readFirstString(
-      json,
-      <String>['role', 'senderRole', 'authorRole', 'type'],
-      fallback: '',
-    ).toLowerCase();
-    final bool isUser = json['isUser'] == true ||
+    final String role = _readFirstString(json, <String>[
+      'role',
+      'senderRole',
+      'authorRole',
+      'type',
+    ], fallback: '').toLowerCase();
+    final bool isUser =
+        json['isUser'] == true ||
         role.contains('user') ||
         role.contains('patient') ||
         role.contains('human');
 
-    final dynamic attachment = json['file'] ?? json['attachment'] ?? json['media'];
+    final dynamic attachment =
+        json['file'] ?? json['attachment'] ?? json['media'];
     String? attachmentName;
     if (attachment is Map<String, dynamic>) {
-      attachmentName = _readNullableString(attachment, <String>['name', 'fileName', 'originalName']);
+      attachmentName = _readNullableString(attachment, <String>[
+        'name',
+        'fileName',
+        'originalName',
+      ]);
     }
 
     return AiChatMessageData(
-      text: _readFirstString(
-        json,
-        <String>['content', 'text', 'message', 'body'],
-        fallback: '',
-      ),
+      text: _readFirstString(json, <String>[
+        'content',
+        'text',
+        'message',
+        'body',
+      ], fallback: ''),
       isUser: isUser,
       attachmentName: attachmentName,
-      createdAt: _readFirstDateTime(json, <String>['createdAt', 'updatedAt', 'sentAt']),
-      disclaimer: _readNullableString(json, <String>['medicalDisclaimer', 'disclaimer']),
+      createdAt: _readFirstDateTime(json, <String>[
+        'createdAt',
+        'updatedAt',
+        'sentAt',
+      ]),
+      disclaimer: _readNullableString(json, <String>[
+        'medicalDisclaimer',
+        'disclaimer',
+      ]),
     );
   }
 }

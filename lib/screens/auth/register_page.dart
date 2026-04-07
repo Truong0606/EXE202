@@ -346,6 +346,22 @@ class _RegisterPageState extends State<RegisterPage> {
                               ),
                             ),
                           ],
+                          if (!widget.continueToProfileSetup) ...[
+                            const SizedBox(height: 12),
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: TextButton(
+                                onPressed: isSubmitting
+                                    ? null
+                                    : () {
+                                        Navigator.of(
+                                          context,
+                                        ).pushNamed(AppRoutes.forgotPassword);
+                                      },
+                                child: const Text('Quên mật khẩu?'),
+                              ),
+                            ),
+                          ],
                         ],
                       )
                     : TextField(

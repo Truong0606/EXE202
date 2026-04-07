@@ -10,13 +10,16 @@ import 'package:first_app/core/services/backend_api_service.dart';
 import 'package:first_app/core/services/notification_service.dart';
 import 'package:first_app/core/theme/app_colors.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:image_cropper/image_cropper.dart';
 import 'package:first_app/navigation/app_routes.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 
 part 'home_page_extras.dart';
 
@@ -29,12 +32,77 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
+Future<File?> _pickAvatarFileWithCrop(BuildContext context) async {
+  final ImagePicker picker = ImagePicker();
+  final XFile? selectedFile = await picker.pickImage(
+    source: ImageSource.gallery,
+    maxWidth: 1600,
+    imageQuality: 92,
+  );
+  if (selectedFile == null) {
+    return null;
+  }
+
+  if (!kIsWeb && !(Platform.isAndroid || Platform.isIOS || Platform.isMacOS)) {
+    return File(selectedFile.path);
+  }
+
+  if (!context.mounted) {
+    return null;
+  }
+
+  final List<PlatformUiSettings> uiSettings = <PlatformUiSettings>[
+    if (!kIsWeb && Platform.isAndroid)
+      AndroidUiSettings(
+        toolbarTitle: 'Cắt ảnh đại diện',
+        toolbarColor: AppColors.primaryBlue,
+        toolbarWidgetColor: Colors.white,
+        activeControlsWidgetColor: AppColors.primaryBlue,
+        cropStyle: CropStyle.circle,
+        initAspectRatio: CropAspectRatioPreset.square,
+        lockAspectRatio: true,
+      ),
+    if (!kIsWeb && Platform.isIOS)
+      IOSUiSettings(
+        title: 'Cắt ảnh đại diện',
+        aspectRatioLockEnabled: true,
+        resetAspectRatioEnabled: false,
+        rectX: 1,
+        rectY: 1,
+        rectWidth: 1,
+        rectHeight: 1,
+      ),
+    if (kIsWeb)
+      WebUiSettings(
+        context: context,
+        presentStyle: WebPresentStyle.dialog,
+        size: const CropperSize(width: 420, height: 520),
+      ),
+  ];
+
+  final CroppedFile? croppedFile = await ImageCropper().cropImage(
+    sourcePath: selectedFile.path,
+    compressFormat: ImageCompressFormat.jpg,
+    compressQuality: 88,
+    aspectRatio: const CropAspectRatio(ratioX: 1, ratioY: 1),
+    uiSettings: uiSettings,
+  );
+
+  if (croppedFile == null) {
+    return null;
+  }
+
+  return File(croppedFile.path);
+}
+
 class _HomePageState extends State<HomePage> {
   final BackendApiService _backendApiService = BackendApiService.instance;
   final AccountSettingsService _accountSettingsService =
       AccountSettingsService.instance;
 
   late int currentTabIndex;
+  bool _hasShownPaymentPromo = false;
+  bool _isCheckingPaymentPromo = false;
   String _displayName = 'GluCare';
   UserProfileData? _currentUserProfile;
   List<BlogArticleData> _blogArticles = const <BlogArticleData>[];
@@ -62,26 +130,21 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _loadCurrentUserProfile() async {
-    UserProfileData? userProfile = await _backendApiService
+    final UserProfileData? userProfile = await _backendApiService
         .fetchCurrentUserProfile();
     if (!mounted || userProfile == null) {
       return;
     }
 
-    userProfile = await _accountSettingsService.applyProfileOverrides(userProfile);
-    if (!mounted) {
-      return;
-    }
-
     final String fullName = userProfile.fullName.trim();
-    if (fullName.isEmpty) {
-      return;
-    }
-
     setState(() {
       _currentUserProfile = userProfile;
-      _displayName = fullName;
+      if (fullName.isNotEmpty) {
+        _displayName = fullName;
+      }
     });
+
+    unawaited(_maybeShowPaymentPromo());
   }
 
   void _handleProfileUpdated(UserProfileData profile) {
@@ -90,6 +153,132 @@ class _HomePageState extends State<HomePage> {
       if (profile.fullName.trim().isNotEmpty) {
         _displayName = profile.fullName.trim();
       }
+    });
+
+    unawaited(_maybeShowPaymentPromo());
+  }
+
+  Future<void> _openPaymentPage() async {
+    final UserProfileData seedProfile =
+        _currentUserProfile ??
+        const UserProfileData(
+          id: '',
+          phoneNumber: '',
+          role: 'PATIENT',
+          fullName: '',
+        );
+
+    final UserProfileData? updatedProfile = await Navigator.of(context)
+        .push<UserProfileData>(
+          MaterialPageRoute<UserProfileData>(
+            builder: (_) => _PaymentSettingsPage(profile: seedProfile),
+          ),
+        );
+    if (!mounted || updatedProfile == null) {
+      return;
+    }
+
+    _handleProfileUpdated(updatedProfile);
+  }
+
+  String _paymentPromoUserKey(UserProfileData profile) {
+    final String userId = profile.id.trim();
+    if (userId.isNotEmpty) {
+      return userId;
+    }
+    return profile.phoneNumber.trim();
+  }
+
+  bool _hasLikelyActivePayment(List<PaymentHistoryItemData> history) {
+    final DateTime now = DateTime.now();
+    for (final PaymentHistoryItemData item in history) {
+      final bool lifetimeActive =
+          item.packageType == 'L' && item.status == 'SUCCESS';
+      final bool expiryActive =
+          item.expiresAt != null && item.expiresAt!.isAfter(now);
+      if (item.isActive || lifetimeActive || expiryActive) {
+        return true;
+      }
+    }
+
+    return history.any(
+      (PaymentHistoryItemData item) => item.status.toUpperCase() == 'SUCCESS',
+    );
+  }
+
+  Future<void> _maybeShowPaymentPromo() async {
+    final UserProfileData? profile = _currentUserProfile;
+    if (_hasShownPaymentPromo ||
+        _isCheckingPaymentPromo ||
+        currentTabIndex != 0 ||
+        profile == null) {
+      return;
+    }
+
+    final String userKey = _paymentPromoUserKey(profile);
+    if (userKey.isEmpty) {
+      return;
+    }
+
+    _isCheckingPaymentPromo = true;
+    final DateTime now = DateTime.now();
+
+    try {
+      final DateTime? lastShownAt = await _accountSettingsService
+          .getPaymentPromoShownAt(userKey);
+      if (lastShownAt != null &&
+          now.difference(lastShownAt) < const Duration(days: 13)) {
+        return;
+      }
+
+      final List<PaymentHistoryItemData> history = await _backendApiService
+          .fetchPaymentHistory(page: 1, limit: 20);
+      if (!mounted || _hasLikelyActivePayment(history)) {
+        return;
+      }
+
+      _hasShownPaymentPromo = true;
+      await _accountSettingsService.setPaymentPromoShownAt(userKey, now);
+    } catch (_) {
+      return;
+    } finally {
+      _isCheckingPaymentPromo = false;
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) {
+        return;
+      }
+
+      final bool shouldOpenPayment =
+          await showDialog<bool>(
+            context: context,
+            builder: (BuildContext dialogContext) {
+              return AlertDialog(
+                title: const Text('Nâng cấp Premium'),
+                content: const Text(
+                  'Mở khóa gói Premium để xem lịch sử thanh toán, theo dõi trạng thái kích hoạt và thanh toán ngay trong ứng dụng.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(false),
+                    child: const Text('Để sau'),
+                  ),
+                  ElevatedButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(true),
+                    child: const Text('Xem gói Premium'),
+                  ),
+                ],
+              );
+            },
+          ) ??
+          false;
+
+      if (!mounted || !shouldOpenPayment) {
+        return;
+      }
+
+      await _openPaymentPage();
     });
   }
 
@@ -118,7 +307,10 @@ class _HomePageState extends State<HomePage> {
     try {
       articles = await _backendApiService.fetchPublishedBlogArticles();
     } catch (error) {
-      blogArticleErrorMessage = error.toString().replaceFirst('Exception: ', '');
+      blogArticleErrorMessage = error.toString().replaceFirst(
+        'Exception: ',
+        '',
+      );
     }
 
     try {
@@ -193,6 +385,7 @@ class _HomePageState extends State<HomePage> {
           setState(() {
             currentTabIndex = index;
           });
+          unawaited(_maybeShowPaymentPromo());
         },
       ),
     );
@@ -268,7 +461,9 @@ class _DashboardTabState extends State<_DashboardTab> {
     setState(() {
       _glucose24hPoints
         ..clear()
-        ..addAll(records.map((GlucoseHistoryItemData item) => item.glucoseValue));
+        ..addAll(
+          records.map((GlucoseHistoryItemData item) => item.glucoseValue),
+        );
     });
   }
 
@@ -526,7 +721,8 @@ class _DashboardTabState extends State<_DashboardTab> {
                         child: Row(
                           children: [
                             const _SafeAssetImage(
-                              path: 'assets/images/homepage/Mascot Head 2 3.png',
+                              path:
+                                  'assets/images/homepage/Mascot Head 2 3.png',
                               width: 40,
                               height: 40,
                             ),
@@ -1224,7 +1420,8 @@ class _AnimatedGoalHeartState extends State<_AnimatedGoalHeart>
   @override
   Widget build(BuildContext context) {
     final double normalizedScore = _normalizedScore;
-    final Color glowColor = Color.lerp(
+    final Color glowColor =
+        Color.lerp(
           const Color(0xFFF7B7B7),
           const Color(0xFFEE5D6C),
           normalizedScore,
@@ -1238,10 +1435,13 @@ class _AnimatedGoalHeartState extends State<_AnimatedGoalHeart>
         final double scale =
             (0.9 + (normalizedScore * 0.05)) +
             (pulse * (0.08 + (normalizedScore * 0.1)));
-        final double glowAlpha = 0.18 + (normalizedScore * 0.18) + (pulse * 0.12);
+        final double glowAlpha =
+            0.18 + (normalizedScore * 0.18) + (pulse * 0.12);
         final double blurRadius = 8 + (normalizedScore * 8) + (pulse * 8);
-        final double spreadRadius = 0.5 + (normalizedScore * 1.5) + (pulse * 1.5);
-        final double heartFill = 0.2 + (normalizedScore * 0.45) + (pulse * 0.25);
+        final double spreadRadius =
+            0.5 + (normalizedScore * 1.5) + (pulse * 1.5);
+        final double heartFill =
+            0.2 + (normalizedScore * 0.45) + (pulse * 0.25);
 
         return Transform.scale(
           scale: scale,
@@ -1258,7 +1458,9 @@ class _AnimatedGoalHeartState extends State<_AnimatedGoalHeart>
               ),
               boxShadow: [
                 BoxShadow(
-                  color: glowColor.withValues(alpha: glowAlpha.clamp(0.0, 0.55)),
+                  color: glowColor.withValues(
+                    alpha: glowAlpha.clamp(0.0, 0.55),
+                  ),
                   blurRadius: blurRadius,
                   spreadRadius: spreadRadius,
                   offset: const Offset(0, 4),
@@ -1269,7 +1471,8 @@ class _AnimatedGoalHeartState extends State<_AnimatedGoalHeart>
               child: Icon(
                 Icons.favorite_rounded,
                 size: 42,
-                color: Color.lerp(
+                color:
+                    Color.lerp(
                       const Color(0xFFE97B8E),
                       const Color(0xFFD83552),
                       heartFill.clamp(0.0, 1.0),
@@ -1412,13 +1615,17 @@ class _AccountTab extends StatefulWidget {
 }
 
 class _AccountTabState extends State<_AccountTab> {
+  final BackendApiService _backendApiService = BackendApiService.instance;
   final AccountSettingsService _accountSettingsService =
       AccountSettingsService.instance;
 
   bool _isLoggingOut = false;
   bool _isLoadingProfile = true;
+  bool _isUploadingAvatar = false;
   bool _notificationsEnabled = true;
   bool _remindersEnabled = true;
+  bool _isProfileMessageError = false;
+  String? _profileMessage;
   UserProfileData? _profile;
 
   @override
@@ -1439,10 +1646,10 @@ class _AccountTabState extends State<_AccountTab> {
   }
 
   Future<void> _loadSettingsState() async {
-    final bool notificationsEnabled =
-        await _accountSettingsService.getNotificationsEnabled();
-    final bool remindersEnabled =
-        await _accountSettingsService.getRemindersEnabled();
+    final bool notificationsEnabled = await _accountSettingsService
+        .getNotificationsEnabled();
+    final bool remindersEnabled = await _accountSettingsService
+        .getRemindersEnabled();
     if (!mounted) {
       return;
     }
@@ -1487,7 +1694,8 @@ class _AccountTabState extends State<_AccountTab> {
       return;
     }
 
-    final bool shouldLogout = await showDialog<bool>(
+    final bool shouldLogout =
+        await showDialog<bool>(
           context: context,
           builder: (BuildContext context) {
             return AlertDialog(
@@ -1535,8 +1743,58 @@ class _AccountTabState extends State<_AccountTab> {
     await _accountSettingsService.setRemindersEnabled(value);
   }
 
+  Future<void> _pickAndUploadAvatar() async {
+    if (_isUploadingAvatar) {
+      return;
+    }
+
+    final File? avatarFile = await _pickAvatarFileWithCrop(context);
+    if (avatarFile == null) {
+      return;
+    }
+
+    setState(() {
+      _isUploadingAvatar = true;
+      _profileMessage = null;
+      _isProfileMessageError = false;
+    });
+
+    try {
+      final UserProfileData? updatedProfile = await _backendApiService
+          .uploadProfileAvatar(avatarFile);
+      if (!mounted) {
+        return;
+      }
+
+      if (updatedProfile != null) {
+        widget.onProfileUpdated(updatedProfile);
+      }
+
+      setState(() {
+        _profile = updatedProfile ?? _profile;
+        _profileMessage = 'Ảnh đại diện đã được cập nhật.';
+        _isProfileMessageError = false;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _profileMessage = error.toString().replaceFirst('Exception: ', '');
+        _isProfileMessageError = true;
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUploadingAvatar = false;
+        });
+      }
+    }
+  }
+
   Future<void> _openEditProfilePage() async {
-    final UserProfileData seedProfile = _profile ??
+    final UserProfileData seedProfile =
+        _profile ??
         const UserProfileData(
           id: '',
           phoneNumber: '',
@@ -1544,21 +1802,40 @@ class _AccountTabState extends State<_AccountTab> {
           fullName: '',
         );
 
-    final UserProfileData? updatedProfile = await Navigator.of(context).push<
-        UserProfileData>(
-      MaterialPageRoute<UserProfileData>(
-        builder: (_) => _EditAccountProfilePage(initialProfile: seedProfile),
-      ),
-    );
+    final UserProfileData? updatedProfile = await Navigator.of(context)
+        .push<UserProfileData>(
+          MaterialPageRoute<UserProfileData>(
+            builder: (_) =>
+                _EditAccountProfilePage(initialProfile: seedProfile),
+          ),
+        );
     if (!mounted || updatedProfile == null) {
       return;
     }
 
-    await _accountSettingsService.saveProfileOverrides(
-      fullName: updatedProfile.fullName,
-      email: updatedProfile.email,
-    );
-    if (!mounted) {
+    setState(() {
+      _profile = updatedProfile;
+    });
+    widget.onProfileUpdated(updatedProfile);
+  }
+
+  Future<void> _openPaymentPage() async {
+    final UserProfileData seedProfile =
+        _profile ??
+        const UserProfileData(
+          id: '',
+          phoneNumber: '',
+          role: 'PATIENT',
+          fullName: '',
+        );
+
+    final UserProfileData? updatedProfile = await Navigator.of(context)
+        .push<UserProfileData>(
+          MaterialPageRoute<UserProfileData>(
+            builder: (_) => _PaymentSettingsPage(profile: seedProfile),
+          ),
+        );
+    if (!mounted || updatedProfile == null) {
       return;
     }
 
@@ -1615,10 +1892,57 @@ class _AccountTabState extends State<_AccountTab> {
       return 'GC';
     }
     if (parts.length == 1) {
-      return parts.first.substring(0, parts.first.length.clamp(0, 2)).toUpperCase();
+      return parts.first
+          .substring(0, parts.first.length.clamp(0, 2))
+          .toUpperCase();
     }
     return (parts.first.characters.first + parts.last.characters.first)
         .toUpperCase();
+  }
+
+  Widget _buildProfileAvatar({
+    required String fullName,
+    String? avatarUrl,
+    double radius = 33,
+  }) {
+    final double diameter = radius * 2;
+    final String imageUrl = (avatarUrl ?? '').trim();
+
+    Widget fallbackAvatar() {
+      return Container(
+        width: diameter,
+        height: diameter,
+        decoration: const BoxDecoration(
+          color: Color(0xFFDFF5FF),
+          shape: BoxShape.circle,
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          _initials(fullName),
+          style: TextStyle(
+            color: const Color(0xFF0E4777),
+            fontSize: radius * 0.72,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      );
+    }
+
+    return SizedBox(
+      width: diameter,
+      height: diameter,
+      child: imageUrl.isEmpty
+          ? fallbackAvatar()
+          : ClipOval(
+              child: Image.network(
+                imageUrl,
+                width: diameter,
+                height: diameter,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => fallbackAvatar(),
+              ),
+            ),
+    );
   }
 
   Widget _buildSectionCard({required List<Widget> children}) {
@@ -1758,17 +2082,54 @@ class _AccountTabState extends State<_AccountTab> {
                       )
                     : Row(
                         children: [
-                          CircleAvatar(
-                            radius: 33,
-                            backgroundColor: const Color(0xFFDFF5FF),
-                            child: Text(
-                              _initials(fullName),
-                              style: const TextStyle(
-                                color: Color(0xFF0E4777),
-                                fontSize: 24,
-                                fontWeight: FontWeight.w800,
+                          Stack(
+                            clipBehavior: Clip.none,
+                            children: [
+                              _buildProfileAvatar(
+                                fullName: fullName,
+                                avatarUrl: _profile?.avatarUrl,
                               ),
-                            ),
+                              Positioned(
+                                right: -2,
+                                bottom: -2,
+                                child: Material(
+                                  color: Colors.transparent,
+                                  child: InkWell(
+                                    onTap: _isUploadingAvatar
+                                        ? null
+                                        : () {
+                                            unawaited(_pickAndUploadAvatar());
+                                          },
+                                    borderRadius: BorderRadius.circular(16),
+                                    child: Container(
+                                      width: 28,
+                                      height: 28,
+                                      decoration: BoxDecoration(
+                                        color: Colors.white,
+                                        borderRadius: BorderRadius.circular(14),
+                                        border: Border.all(
+                                          color: const Color(0xFFB8D9EF),
+                                        ),
+                                      ),
+                                      alignment: Alignment.center,
+                                      child: _isUploadingAvatar
+                                          ? const SizedBox(
+                                              width: 14,
+                                              height: 14,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                              ),
+                                            )
+                                          : const Icon(
+                                              Icons.camera_alt_rounded,
+                                              size: 15,
+                                              color: Color(0xFF0E4777),
+                                            ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                           const SizedBox(width: 14),
                           Expanded(
@@ -1791,6 +2152,14 @@ class _AccountTabState extends State<_AccountTab> {
                                     color: Color(0xFFD0E9FA),
                                     fontSize: 13,
                                     fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                const Text(
+                                  'Chạm biểu tượng máy ảnh để thay ảnh đại diện',
+                                  style: TextStyle(
+                                    color: Color(0xFFDFF3FF),
+                                    fontSize: 12,
                                   ),
                                 ),
                                 if (phoneNumber.isNotEmpty) ...[
@@ -1819,15 +2188,56 @@ class _AccountTabState extends State<_AccountTab> {
                         ],
                       ),
               ),
+              if ((_profileMessage ?? '').trim().isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
+                  decoration: BoxDecoration(
+                    color: _isProfileMessageError
+                        ? const Color(0xFFFFE7E7)
+                        : const Color(0xFFE8F7E9),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: _isProfileMessageError
+                          ? const Color(0xFFFFB7B7)
+                          : const Color(0xFF97D8A1),
+                    ),
+                  ),
+                  child: Text(
+                    _profileMessage!,
+                    style: TextStyle(
+                      color: _isProfileMessageError
+                          ? const Color(0xFFB3261E)
+                          : const Color(0xFF166534),
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
               const SizedBox(height: 18),
               _buildSectionCard(
                 children: [
                   _buildMenuTile(
                     icon: Icons.badge_outlined,
                     title: 'Thông tin cá nhân',
-                    subtitle: 'Chỉnh sửa tên hiển thị và email trên thiết bị',
+                    subtitle: 'Cập nhật hồ sơ tài khoản từ máy chủ',
                     onTap: () {
                       unawaited(_openEditProfilePage());
+                    },
+                  ),
+                  const Divider(height: 1, color: Color(0xFFE2EDF3)),
+                  _buildMenuTile(
+                    icon: Icons.workspace_premium_outlined,
+                    title: 'Thanh toán gói Premium',
+                    subtitle:
+                        'Mở thanh toán trong app, xem lịch sử giao dịch và trạng thái kích hoạt',
+                    onTap: () {
+                      unawaited(_openPaymentPage());
                     },
                   ),
                   const Divider(height: 1, color: Color(0xFFE2EDF3)),
@@ -1840,7 +2250,7 @@ class _AccountTabState extends State<_AccountTab> {
                         _showInfoDialog(
                           title: 'Bảo mật tài khoản',
                           message:
-                              'Đã kiểm tra API hiện có: app đọc profile qua /v1/auth/me, nhưng chưa có endpoint cập nhật hồ sơ hoặc đổi mật khẩu được tài liệu hóa cho màn hình này. Vì vậy phần chỉnh sửa hồ sơ hiện được lưu cục bộ trên thiết bị.',
+                              'API hiện đã hỗ trợ cập nhật hồ sơ qua /v1/profile. Nếu cần đặt lại mật khẩu, hãy dùng mục Quên mật khẩu ở màn hình đăng nhập.',
                         ),
                       );
                     },
@@ -1985,14 +2395,23 @@ class _EditAccountProfilePage extends StatefulWidget {
   final UserProfileData initialProfile;
 
   @override
-  State<_EditAccountProfilePage> createState() => _EditAccountProfilePageState();
+  State<_EditAccountProfilePage> createState() =>
+      _EditAccountProfilePageState();
 }
 
 class _EditAccountProfilePageState extends State<_EditAccountProfilePage> {
+  final BackendApiService _backendApiService = BackendApiService.instance;
   late final TextEditingController _nameController;
-  late final TextEditingController _emailController;
+  late final TextEditingController _hospitalController;
+  late final TextEditingController _specializationController;
+  late UserProfileData _workingProfile;
   bool _isSaving = false;
+  bool _isUploadingAvatar = false;
   bool _showValidationErrors = false;
+  String? _submitErrorMessage;
+  String? _successMessage;
+  String? _selectedGender;
+  DateTime? _selectedDateOfBirth;
 
   String? get _nameError {
     if (!_showValidationErrors) {
@@ -2009,45 +2428,197 @@ class _EditAccountProfilePageState extends State<_EditAccountProfilePage> {
     return null;
   }
 
-  String? get _emailError {
+  String? get _dateOfBirthError {
     if (!_showValidationErrors) {
       return null;
     }
 
-    final String email = _emailController.text.trim();
-    if (email.isEmpty) {
-      return null;
-    }
-    if (!RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(email)) {
-      return 'Email không đúng định dạng';
+    final bool isPatient = widget.initialProfile.role.toUpperCase().contains(
+      'PATIENT',
+    );
+    if (isPatient && _selectedDateOfBirth == null) {
+      return 'Vui lòng chọn ngày sinh';
     }
     return null;
+  }
+
+  bool get _isDoctorRole {
+    return widget.initialProfile.role.toUpperCase().contains('DOCTOR');
+  }
+
+  bool get _isPatientRole {
+    return widget.initialProfile.role.toUpperCase().contains('PATIENT');
   }
 
   @override
   void initState() {
     super.initState();
-    _nameController = TextEditingController(text: widget.initialProfile.fullName);
-    _emailController = TextEditingController(
-      text: widget.initialProfile.email ?? '',
+    _workingProfile = widget.initialProfile;
+    _nameController = TextEditingController(text: _workingProfile.fullName);
+    _hospitalController = TextEditingController(
+      text: _workingProfile.hospital ?? '',
     );
+    _specializationController = TextEditingController(
+      text: _workingProfile.specialization ?? '',
+    );
+    _selectedGender = (_workingProfile.gender ?? '').trim().isEmpty
+        ? null
+        : _workingProfile.gender;
+    final String rawDate = (_workingProfile.dateOfBirth ?? '').trim();
+    if (rawDate.isNotEmpty) {
+      _selectedDateOfBirth = DateTime.tryParse(rawDate);
+    }
   }
 
   @override
   void dispose() {
     _nameController.dispose();
-    _emailController.dispose();
+    _hospitalController.dispose();
+    _specializationController.dispose();
     super.dispose();
+  }
+
+  String _formatDate(DateTime value) {
+    final String day = value.day.toString().padLeft(2, '0');
+    final String month = value.month.toString().padLeft(2, '0');
+    final String year = value.year.toString();
+    return '$day/$month/$year';
+  }
+
+  Future<void> _pickBirthDate() async {
+    final DateTime now = DateTime.now();
+    final DateTime initialDate =
+        _selectedDateOfBirth ?? DateTime(now.year - 18, now.month, now.day);
+    final DateTime? picked = await showDatePicker(
+      context: context,
+      initialDate: initialDate,
+      firstDate: DateTime(1900),
+      lastDate: now,
+      helpText: 'Chọn ngày sinh',
+    );
+    if (picked == null) {
+      return;
+    }
+    setState(() {
+      _selectedDateOfBirth = picked;
+      _submitErrorMessage = null;
+      _successMessage = null;
+    });
+  }
+
+  Future<void> _pickAndUploadAvatar() async {
+    if (_isUploadingAvatar || _isSaving) {
+      return;
+    }
+
+    final File? avatarFile = await _pickAvatarFileWithCrop(context);
+    if (avatarFile == null) {
+      return;
+    }
+
+    setState(() {
+      _isUploadingAvatar = true;
+      _submitErrorMessage = null;
+      _successMessage = null;
+    });
+
+    try {
+      final UserProfileData? updatedProfile = await _backendApiService
+          .uploadProfileAvatar(avatarFile);
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _workingProfile = updatedProfile ?? _workingProfile;
+        _successMessage = 'Ảnh đại diện đã được cập nhật.';
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _submitErrorMessage = error.toString().replaceFirst('Exception: ', '');
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUploadingAvatar = false;
+        });
+      }
+    }
+  }
+
+  String _initials(String name) {
+    final List<String> parts = name
+        .split(RegExp(r'\s+'))
+        .where((String part) => part.trim().isNotEmpty)
+        .toList();
+    if (parts.isEmpty) {
+      return 'GC';
+    }
+    if (parts.length == 1) {
+      return parts.first
+          .substring(0, parts.first.length.clamp(0, 2))
+          .toUpperCase();
+    }
+    return (parts.first.characters.first + parts.last.characters.first)
+        .toUpperCase();
+  }
+
+  Widget _buildAvatarPreview({double radius = 42}) {
+    final double diameter = radius * 2;
+    final String fullName = _nameController.text.trim().isEmpty
+        ? _workingProfile.fullName
+        : _nameController.text.trim();
+    final String imageUrl = (_workingProfile.avatarUrl ?? '').trim();
+
+    Widget fallbackAvatar() {
+      return Container(
+        width: diameter,
+        height: diameter,
+        decoration: const BoxDecoration(
+          color: Color(0xFFDFF5FF),
+          shape: BoxShape.circle,
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          _initials(fullName),
+          style: TextStyle(
+            color: const Color(0xFF0E4777),
+            fontSize: radius * 0.72,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      );
+    }
+
+    return SizedBox(
+      width: diameter,
+      height: diameter,
+      child: imageUrl.isEmpty
+          ? fallbackAvatar()
+          : ClipOval(
+              child: Image.network(
+                imageUrl,
+                width: diameter,
+                height: diameter,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => fallbackAvatar(),
+              ),
+            ),
+    );
   }
 
   Future<void> _saveProfile() async {
     final String fullName = _nameController.text.trim();
-    final String email = _emailController.text.trim();
     setState(() {
       _showValidationErrors = true;
+      _submitErrorMessage = null;
+      _successMessage = null;
     });
 
-    if (_nameError != null || _emailError != null) {
+    if (_nameError != null || _dateOfBirthError != null) {
       return;
     }
 
@@ -2059,12 +2630,49 @@ class _EditAccountProfilePageState extends State<_EditAccountProfilePage> {
       return;
     }
 
-    Navigator.of(context).pop(
-      widget.initialProfile.copyWith(
-        fullName: fullName,
-        email: email.isEmpty ? null : email,
-      ),
-    );
+    try {
+      final UserProfileData? updatedProfile = await _backendApiService
+          .updateCurrentUserProfile(
+            fullName: fullName,
+            gender: _selectedGender,
+            dateOfBirth: _selectedDateOfBirth?.toIso8601String(),
+            specialization: _specializationController.text.trim(),
+            hospital: _hospitalController.text.trim(),
+          );
+
+      if (!mounted) {
+        return;
+      }
+
+      Navigator.of(context).pop(
+        updatedProfile ??
+            _workingProfile.copyWith(
+              fullName: fullName,
+              gender: _selectedGender,
+              dateOfBirth: _selectedDateOfBirth?.toIso8601String(),
+              specialization: _specializationController.text.trim().isEmpty
+                  ? null
+                  : _specializationController.text.trim(),
+              hospital: _hospitalController.text.trim().isEmpty
+                  ? null
+                  : _hospitalController.text.trim(),
+            ),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _submitErrorMessage = error.toString().replaceFirst('Exception: ', '');
+        _successMessage = null;
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSaving = false;
+        });
+      }
+    }
   }
 
   @override
@@ -2090,12 +2698,149 @@ class _EditAccountProfilePageState extends State<_EditAccountProfilePage> {
                   borderRadius: BorderRadius.circular(18),
                 ),
                 child: const Text(
-                  'Đã kiểm tra API: hiện có thể đọc hồ sơ qua /v1/auth/me nhưng chưa có endpoint cập nhật hồ sơ cho màn hình này. Các thay đổi bên dưới sẽ được lưu cục bộ trên thiết bị và áp dụng cho Trang chủ cùng mục Tài khoản.',
+                  'Các thay đổi tại đây sẽ được gửi lên hồ sơ tài khoản qua API mới. Sau khi lưu, Trang chủ và mục Tài khoản sẽ dùng lại dữ liệu máy chủ.',
                   style: TextStyle(
                     color: Color(0xFF305167),
                     fontSize: 13,
                     height: 1.45,
                   ),
+                ),
+              ),
+              const SizedBox(height: 18),
+              if ((_submitErrorMessage ?? '').trim().isNotEmpty) ...[
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFE7E7),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: const Color(0xFFFFB7B7)),
+                  ),
+                  child: Text(
+                    _submitErrorMessage!,
+                    style: const TextStyle(
+                      color: Color(0xFFB3261E),
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
+              if ((_successMessage ?? '').trim().isNotEmpty) ...[
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE8F7E9),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: const Color(0xFF97D8A1)),
+                  ),
+                  child: Text(
+                    _successMessage!,
+                    style: const TextStyle(
+                      color: Color(0xFF166534),
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child: Column(
+                  children: [
+                    Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        _buildAvatarPreview(),
+                        Positioned(
+                          right: -2,
+                          bottom: -2,
+                          child: Material(
+                            color: Colors.transparent,
+                            child: InkWell(
+                              onTap: _isUploadingAvatar
+                                  ? null
+                                  : () {
+                                      unawaited(_pickAndUploadAvatar());
+                                    },
+                              borderRadius: BorderRadius.circular(16),
+                              child: Container(
+                                width: 30,
+                                height: 30,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF1564A6),
+                                  borderRadius: BorderRadius.circular(15),
+                                  border: Border.all(color: Colors.white),
+                                ),
+                                alignment: Alignment.center,
+                                child: _isUploadingAvatar
+                                    ? const SizedBox(
+                                        width: 15,
+                                        height: 15,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.white,
+                                        ),
+                                      )
+                                    : const Icon(
+                                        Icons.camera_alt_rounded,
+                                        size: 16,
+                                        color: Colors.white,
+                                      ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    const Text(
+                      'Ảnh đại diện',
+                      style: TextStyle(
+                        color: Color(0xFF17324F),
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Chọn ảnh từ thư viện để cập nhật hồ sơ.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Color(0xFF658196),
+                        fontSize: 13,
+                        height: 1.4,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      onPressed: _isUploadingAvatar
+                          ? null
+                          : () {
+                              unawaited(_pickAndUploadAvatar());
+                            },
+                      icon: const Icon(Icons.photo_library_outlined),
+                      label: Text(
+                        _isUploadingAvatar
+                            ? 'Đang tải ảnh...'
+                            : 'Đổi ảnh đại diện',
+                      ),
+                    ),
+                  ],
                 ),
               ),
               const SizedBox(height: 18),
@@ -2111,8 +2856,10 @@ class _EditAccountProfilePageState extends State<_EditAccountProfilePage> {
               TextField(
                 controller: _nameController,
                 onChanged: (_) {
-                  if (_showValidationErrors) {
-                    setState(() {});
+                  if (_showValidationErrors || _successMessage != null) {
+                    setState(() {
+                      _successMessage = null;
+                    });
                   }
                 },
                 decoration: InputDecoration(
@@ -2137,45 +2884,153 @@ class _EditAccountProfilePageState extends State<_EditAccountProfilePage> {
                 ),
               ],
               const SizedBox(height: 16),
-              const Text(
-                'Email',
-                style: TextStyle(
-                  color: Color(0xFF17324F),
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: _emailController,
-                keyboardType: TextInputType.emailAddress,
-                onChanged: (_) {
-                  if (_showValidationErrors) {
-                    setState(() {});
-                  }
-                },
-                decoration: InputDecoration(
-                  filled: true,
-                  fillColor: Colors.white,
-                  hintText: 'you@example.com',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(14),
-                    borderSide: BorderSide.none,
-                  ),
-                ),
-              ),
-              if (_emailError != null) ...[
-                const SizedBox(height: 8),
-                Text(
-                  _emailError!,
-                  style: const TextStyle(
-                    color: Colors.red,
+              if (_isPatientRole) ...[
+                const Text(
+                  'Giới tính',
+                  style: TextStyle(
+                    color: Color(0xFF17324F),
                     fontSize: 14,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: FontWeight.w700,
                   ),
                 ),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<String>(
+                  initialValue: _selectedGender,
+                  onChanged: (String? value) {
+                    setState(() {
+                      _selectedGender = value;
+                      _submitErrorMessage = null;
+                      _successMessage = null;
+                    });
+                  },
+                  items: const [
+                    DropdownMenuItem<String>(value: 'M', child: Text('Nam')),
+                    DropdownMenuItem<String>(value: 'F', child: Text('Nữ')),
+                    DropdownMenuItem<String>(value: 'O', child: Text('Khác')),
+                  ],
+                  decoration: InputDecoration(
+                    filled: true,
+                    fillColor: Colors.white,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Ngày sinh',
+                  style: TextStyle(
+                    color: Color(0xFF17324F),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                InkWell(
+                  onTap: _pickBirthDate,
+                  borderRadius: BorderRadius.circular(14),
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 16,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Text(
+                      _selectedDateOfBirth == null
+                          ? 'Chọn ngày sinh'
+                          : _formatDate(_selectedDateOfBirth!),
+                      style: TextStyle(
+                        color: _selectedDateOfBirth == null
+                            ? const Color(0xFF6B8496)
+                            : const Color(0xFF17324F),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+                if (_dateOfBirthError != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    _dateOfBirthError!,
+                    style: const TextStyle(
+                      color: Colors.red,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 16),
               ],
-              const SizedBox(height: 16),
+              if (_isDoctorRole) ...[
+                const Text(
+                  'Chuyên khoa',
+                  style: TextStyle(
+                    color: Color(0xFF17324F),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _specializationController,
+                  onChanged: (_) {
+                    if (_submitErrorMessage != null ||
+                        _successMessage != null) {
+                      setState(() {
+                        _submitErrorMessage = null;
+                        _successMessage = null;
+                      });
+                    }
+                  },
+                  decoration: InputDecoration(
+                    filled: true,
+                    fillColor: Colors.white,
+                    hintText: 'Ví dụ: Nội tiết',
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Bệnh viện',
+                  style: TextStyle(
+                    color: Color(0xFF17324F),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _hospitalController,
+                  onChanged: (_) {
+                    if (_submitErrorMessage != null ||
+                        _successMessage != null) {
+                      setState(() {
+                        _submitErrorMessage = null;
+                        _successMessage = null;
+                      });
+                    }
+                  },
+                  decoration: InputDecoration(
+                    filled: true,
+                    fillColor: Colors.white,
+                    hintText: 'Tên cơ sở y tế',
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
               const Text(
                 'Số điện thoại',
                 style: TextStyle(
@@ -2187,7 +3042,10 @@ class _EditAccountProfilePageState extends State<_EditAccountProfilePage> {
               const SizedBox(height: 8),
               Container(
                 width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 16,
+                ),
                 decoration: BoxDecoration(
                   color: const Color(0xFFEAF3F8),
                   borderRadius: BorderRadius.circular(14),
@@ -2203,6 +3061,37 @@ class _EditAccountProfilePageState extends State<_EditAccountProfilePage> {
                   ),
                 ),
               ),
+              if ((widget.initialProfile.email ?? '').trim().isNotEmpty) ...[
+                const SizedBox(height: 16),
+                const Text(
+                  'Email',
+                  style: TextStyle(
+                    color: Color(0xFF17324F),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 16,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFEAF3F8),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Text(
+                    widget.initialProfile.email!,
+                    style: const TextStyle(
+                      color: Color(0xFF4A6679),
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
               const SizedBox(height: 24),
               SizedBox(
                 width: double.infinity,
@@ -2234,6 +3123,825 @@ class _EditAccountProfilePageState extends State<_EditAccountProfilePage> {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _PaymentPlanInfo {
+  const _PaymentPlanInfo({
+    required this.packageType,
+    required this.title,
+    required this.subtitle,
+    required this.priceVnd,
+    required this.badge,
+  });
+
+  final String packageType;
+  final String title;
+  final String subtitle;
+  final int priceVnd;
+  final String badge;
+}
+
+class _PaymentSettingsPage extends StatefulWidget {
+  const _PaymentSettingsPage({required this.profile});
+
+  final UserProfileData profile;
+
+  @override
+  State<_PaymentSettingsPage> createState() => _PaymentSettingsPageState();
+}
+
+class _PaymentSettingsPageState extends State<_PaymentSettingsPage> {
+  static const List<_PaymentPlanInfo> _plans = <_PaymentPlanInfo>[
+    _PaymentPlanInfo(
+      packageType: 'M',
+      title: 'Gói tháng',
+      subtitle: 'Sử dụng trong 1 tháng',
+      priceVnd: 50000,
+      badge: 'Phổ biến',
+    ),
+    _PaymentPlanInfo(
+      packageType: 'Y',
+      title: 'Gói năm',
+      subtitle: 'Tiết kiệm cho 12 tháng',
+      priceVnd: 450000,
+      badge: 'Tiết kiệm',
+    ),
+    _PaymentPlanInfo(
+      packageType: 'L',
+      title: 'Gói trọn đời',
+      subtitle: 'Kích hoạt vĩnh viễn',
+      priceVnd: 1000000,
+      badge: 'Forever',
+    ),
+  ];
+
+  final BackendApiService _backendApiService = BackendApiService.instance;
+
+  late UserProfileData _profile;
+  bool _isLoading = true;
+  String? _errorMessage;
+  String? _noticeMessage;
+  String? _cancellingTransactionId;
+  String? _initiatingPackageType;
+  List<PaymentHistoryItemData> _paymentHistory =
+      const <PaymentHistoryItemData>[];
+
+  @override
+  void initState() {
+    super.initState();
+    _profile = widget.profile;
+    unawaited(_loadPaymentHistory());
+  }
+
+  PaymentHistoryItemData? get _activePayment {
+    final DateTime now = DateTime.now();
+    for (final PaymentHistoryItemData item in _paymentHistory) {
+      final bool lifetimeActive =
+          item.packageType == 'L' && item.status == 'SUCCESS';
+      final bool expiryActive =
+          item.expiresAt != null && item.expiresAt!.isAfter(now);
+      if (item.isActive || lifetimeActive || expiryActive) {
+        return item;
+      }
+    }
+
+    for (final PaymentHistoryItemData item in _paymentHistory) {
+      if (item.status == 'SUCCESS') {
+        return item;
+      }
+    }
+    return null;
+  }
+
+  String _planLabel(String packageType) {
+    final _PaymentPlanInfo? plan = _plans
+        .where((_PaymentPlanInfo item) => item.packageType == packageType)
+        .firstOrNull;
+    return plan?.title ?? packageType;
+  }
+
+  String _statusLabel(String status) {
+    switch (status.toUpperCase()) {
+      case 'SUCCESS':
+        return 'Thành công';
+      case 'PENDING':
+        return 'Đang chờ';
+      case 'FAILED':
+        return 'Thất bại';
+      case 'CANCELLED':
+        return 'Đã hủy';
+      case 'ACTIVE':
+        return 'Đang hoạt động';
+      default:
+        return status.isEmpty ? 'Không rõ' : status;
+    }
+  }
+
+  Color _statusColor(String status) {
+    switch (status.toUpperCase()) {
+      case 'SUCCESS':
+      case 'ACTIVE':
+        return const Color(0xFF166534);
+      case 'PENDING':
+        return const Color(0xFF9A6700);
+      case 'FAILED':
+      case 'CANCELLED':
+        return const Color(0xFFB3261E);
+      default:
+        return const Color(0xFF305167);
+    }
+  }
+
+  Color _statusBackgroundColor(String status) {
+    switch (status.toUpperCase()) {
+      case 'SUCCESS':
+      case 'ACTIVE':
+        return const Color(0xFFE8F7E9);
+      case 'PENDING':
+        return const Color(0xFFFFF4D6);
+      case 'FAILED':
+      case 'CANCELLED':
+        return const Color(0xFFFFE7E7);
+      default:
+        return const Color(0xFFEAF3F8);
+    }
+  }
+
+  String _formatCurrency(double? amount, {int? fallback}) {
+    final int value = (amount ?? fallback ?? 0).round();
+    final String digits = value.toString();
+    final StringBuffer buffer = StringBuffer();
+    for (int index = 0; index < digits.length; index++) {
+      final int reverseIndex = digits.length - index;
+      buffer.write(digits[index]);
+      if (reverseIndex > 1 && reverseIndex % 3 == 1) {
+        buffer.write('.');
+      }
+    }
+    return '${buffer.toString()} VND';
+  }
+
+  String _formatDateTime(DateTime? value) {
+    if (value == null) {
+      return 'Chưa có';
+    }
+    final DateTime local = value.toLocal();
+    final String day = local.day.toString().padLeft(2, '0');
+    final String month = local.month.toString().padLeft(2, '0');
+    final String year = local.year.toString();
+    final String hour = local.hour.toString().padLeft(2, '0');
+    final String minute = local.minute.toString().padLeft(2, '0');
+    return '$day/$month/$year $hour:$minute';
+  }
+
+  Future<void> _loadPaymentHistory() async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final List<PaymentHistoryItemData> history = await _backendApiService
+          .fetchPaymentHistory(page: 1, limit: 20);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _paymentHistory = history;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _errorMessage = error.toString().replaceFirst('Exception: ', '');
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _startPayment(_PaymentPlanInfo plan) async {
+    final String userId = _profile.id.trim();
+    if (userId.isEmpty) {
+      setState(() {
+        _errorMessage = 'Không tìm thấy userId để khởi tạo thanh toán.';
+      });
+      return;
+    }
+
+    setState(() {
+      _initiatingPackageType = plan.packageType;
+      _errorMessage = null;
+      _noticeMessage = null;
+    });
+
+    try {
+      final PaymentInitiationData initiation = await _backendApiService
+          .initiatePayment(userId: userId, packageType: plan.packageType);
+      if (!mounted) {
+        return;
+      }
+
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => _PaymentWebViewPage(
+            paymentUrl: initiation.paymentUrl,
+            title: plan.title,
+          ),
+        ),
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _noticeMessage =
+            'Đã quay lại từ trang thanh toán. Đang làm mới trạng thái giao dịch.';
+      });
+      await _loadPaymentHistory();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _errorMessage = error.toString().replaceFirst('Exception: ', '');
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _initiatingPackageType = null;
+        });
+      }
+    }
+  }
+
+  Future<void> _cancelPendingPayment(PaymentHistoryItemData item) async {
+    if (_cancellingTransactionId != null) {
+      return;
+    }
+
+    final bool shouldCancel =
+        await showDialog<bool>(
+          context: context,
+          builder: (BuildContext context) {
+            return AlertDialog(
+              title: const Text('Hủy giao dịch chờ'),
+              content: Text(
+                'Bạn có chắc muốn hủy giao dịch ${item.id.isEmpty ? '' : item.id} không?',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  child: const Text('Giữ lại'),
+                ),
+                ElevatedButton(
+                  onPressed: () => Navigator.of(context).pop(true),
+                  child: const Text('Hủy giao dịch'),
+                ),
+              ],
+            );
+          },
+        ) ??
+        false;
+
+    if (!shouldCancel) {
+      return;
+    }
+
+    setState(() {
+      _cancellingTransactionId = item.id.trim().isEmpty
+          ? '__latest__'
+          : item.id;
+      _errorMessage = null;
+      _noticeMessage = null;
+    });
+
+    try {
+      await _backendApiService.cancelPendingPayment(transactionId: item.id);
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _noticeMessage = 'Đã gửi yêu cầu hủy giao dịch chờ.';
+      });
+      await _loadPaymentHistory();
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _errorMessage = error.toString().replaceFirst('Exception: ', '');
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _cancellingTransactionId = null;
+        });
+      }
+    }
+  }
+
+  Widget _buildMessageBox({required String text, required bool isError}) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: isError ? const Color(0xFFFFE7E7) : const Color(0xFFE8F7E9),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: isError ? const Color(0xFFFFB7B7) : const Color(0xFF97D8A1),
+        ),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: isError ? const Color(0xFFB3261E) : const Color(0xFF166534),
+          fontSize: 14,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPlanCard(_PaymentPlanInfo plan) {
+    final bool isBusy = _initiatingPackageType == plan.packageType;
+    final PaymentHistoryItemData? active = _activePayment;
+    final bool isCurrentPlan = active?.packageType == plan.packageType;
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 14),
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: isCurrentPlan
+              ? const Color(0xFF1564A6)
+              : const Color(0xFFDCE8F0),
+          width: isCurrentPlan ? 1.6 : 1,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFDCEFFC),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  plan.badge,
+                  style: const TextStyle(
+                    color: Color(0xFF1564A6),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              const Spacer(),
+              if (isCurrentPlan)
+                const Text(
+                  'Đang dùng',
+                  style: TextStyle(
+                    color: Color(0xFF166534),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Text(
+            plan.title,
+            style: const TextStyle(
+              color: Color(0xFF17324F),
+              fontSize: 22,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            plan.subtitle,
+            style: const TextStyle(
+              color: Color(0xFF658196),
+              fontSize: 13,
+              height: 1.35,
+            ),
+          ),
+          const SizedBox(height: 18),
+          Text(
+            _formatCurrency(null, fallback: plan.priceVnd),
+            style: const TextStyle(
+              color: Color(0xFF07173A),
+              fontSize: 26,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 14),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: isBusy ? null : () => _startPayment(plan),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF12355A),
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+              ),
+              child: isBusy
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Text(
+                      'Thanh toán trong app',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHistoryCard(PaymentHistoryItemData item) {
+    final Color statusColor = _statusColor(item.status);
+    final bool isPending = item.status.toUpperCase() == 'PENDING';
+    final bool isCancelling =
+        _cancellingTransactionId != null &&
+        _cancellingTransactionId ==
+            (item.id.trim().isEmpty ? '__latest__' : item.id);
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  _planLabel(item.packageType),
+                  style: const TextStyle(
+                    color: Color(0xFF17324F),
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: _statusBackgroundColor(item.status),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  _statusLabel(item.status),
+                  style: TextStyle(
+                    color: statusColor,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            _formatCurrency(item.amount),
+            style: const TextStyle(
+              color: Color(0xFF07173A),
+              fontSize: 20,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Khởi tạo: ${_formatDateTime(item.createdAt)}',
+            style: const TextStyle(color: Color(0xFF5E7688), fontSize: 13),
+          ),
+          if (item.paidAt != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              'Thanh toán: ${_formatDateTime(item.paidAt)}',
+              style: const TextStyle(color: Color(0xFF5E7688), fontSize: 13),
+            ),
+          ],
+          if (item.expiresAt != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              'Hiệu lực đến: ${_formatDateTime(item.expiresAt)}',
+              style: const TextStyle(color: Color(0xFF5E7688), fontSize: 13),
+            ),
+          ],
+          if (item.id.trim().isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              'Mã giao dịch: ${item.id}',
+              style: const TextStyle(color: Color(0xFF5E7688), fontSize: 13),
+            ),
+          ],
+          if (isPending) ...[
+            const SizedBox(height: 14),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: isCancelling
+                    ? null
+                    : () {
+                        unawaited(_cancelPendingPayment(item));
+                      },
+                icon: isCancelling
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.close_rounded),
+                label: Text(
+                  isCancelling ? 'Đang hủy giao dịch...' : 'Hủy giao dịch chờ',
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFFB3261E),
+                  side: const BorderSide(color: Color(0xFFFFB7B7)),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final PaymentHistoryItemData? activePayment = _activePayment;
+    final String activeTitle = activePayment == null
+        ? 'Chưa có gói Premium đang hoạt động'
+        : 'Gói hiện tại: ${_planLabel(activePayment.packageType)}';
+    final String activeSubtitle = activePayment == null
+        ? 'Bạn có thể chọn gói tháng, năm hoặc trọn đời và thanh toán ngay trong app.'
+        : activePayment.packageType == 'L'
+        ? 'Gói trọn đời đang hoạt động trên tài khoản này.'
+        : activePayment.expiresAt != null
+        ? 'Hiệu lực đến ${_formatDateTime(activePayment.expiresAt)}.'
+        : 'Giao dịch gần nhất đang được xem là có hiệu lực.';
+
+    return Scaffold(
+      backgroundColor: const Color(0xFFDDF2FB),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF1564A6),
+        foregroundColor: Colors.white,
+        title: const Text('Thanh toán Premium'),
+      ),
+      body: SafeArea(
+        child: RefreshIndicator(
+          onRefresh: _loadPaymentHistory,
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(18, 18, 18, 26),
+            children: [
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [Color(0xFF1564A6), Color(0xFF07173A)],
+                  ),
+                  borderRadius: BorderRadius.circular(22),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      activeTitle,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      activeSubtitle,
+                      style: const TextStyle(
+                        color: Color(0xFFDFF3FF),
+                        fontSize: 13,
+                        height: 1.45,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              if ((_errorMessage ?? '').trim().isNotEmpty) ...[
+                _buildMessageBox(text: _errorMessage!, isError: true),
+                const SizedBox(height: 14),
+              ],
+              if ((_noticeMessage ?? '').trim().isNotEmpty) ...[
+                _buildMessageBox(text: _noticeMessage!, isError: false),
+                const SizedBox(height: 14),
+              ],
+              const Text(
+                'Chọn gói thanh toán',
+                style: TextStyle(
+                  color: Color(0xFF17324F),
+                  fontSize: 18,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 10),
+              const Text(
+                'M: 50.000 VND, Y: 450.000 VND, L: 1.000.000 VND. Sau khi khởi tạo, trang thanh toán sẽ mở ngay trong app.',
+                style: TextStyle(
+                  color: Color(0xFF5E7688),
+                  fontSize: 13,
+                  height: 1.4,
+                ),
+              ),
+              const SizedBox(height: 16),
+              for (final _PaymentPlanInfo plan in _plans) _buildPlanCard(plan),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Lịch sử thanh toán',
+                      style: TextStyle(
+                        color: Color(0xFF17324F),
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: _isLoading
+                        ? null
+                        : () => unawaited(_loadPaymentHistory()),
+                    icon: const Icon(Icons.refresh_rounded),
+                  ),
+                ],
+              ),
+              if (_isLoading)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 24),
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else if (_paymentHistory.isEmpty)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(18),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  child: const Text(
+                    'Chưa có giao dịch nào. Hãy chọn một gói để bắt đầu.',
+                    style: TextStyle(
+                      color: Color(0xFF5E7688),
+                      fontSize: 14,
+                      height: 1.45,
+                    ),
+                  ),
+                )
+              else
+                for (final PaymentHistoryItemData item in _paymentHistory)
+                  _buildHistoryCard(item),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PaymentWebViewPage extends StatefulWidget {
+  const _PaymentWebViewPage({required this.paymentUrl, required this.title});
+
+  final String paymentUrl;
+  final String title;
+
+  @override
+  State<_PaymentWebViewPage> createState() => _PaymentWebViewPageState();
+}
+
+class _PaymentWebViewPageState extends State<_PaymentWebViewPage> {
+  late final WebViewController _controller;
+  int _progress = 0;
+  String? _currentUrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setNavigationDelegate(
+        NavigationDelegate(
+          onProgress: (int progress) {
+            if (!mounted) {
+              return;
+            }
+            setState(() {
+              _progress = progress;
+            });
+          },
+          onPageStarted: (String url) {
+            if (!mounted) {
+              return;
+            }
+            setState(() {
+              _currentUrl = url;
+            });
+          },
+          onPageFinished: (String url) {
+            if (!mounted) {
+              return;
+            }
+            setState(() {
+              _currentUrl = url;
+            });
+          },
+        ),
+      )
+      ..loadRequest(Uri.parse(widget.paymentUrl));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF1564A6),
+        foregroundColor: Colors.white,
+        title: Text(widget.title),
+        actions: [
+          IconButton(
+            onPressed: () => Navigator.of(context).pop(),
+            icon: const Icon(Icons.close_rounded),
+          ),
+        ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(2),
+          child: _progress >= 100
+              ? const SizedBox.shrink()
+              : LinearProgressIndicator(
+                  value: _progress / 100,
+                  minHeight: 2,
+                  backgroundColor: Colors.white24,
+                  valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
+                ),
+        ),
+      ),
+      body: Column(
+        children: [
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            color: const Color(0xFFEAF3F8),
+            child: Text(
+              (_currentUrl ?? widget.paymentUrl).trim(),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Color(0xFF4A6679), fontSize: 12),
+            ),
+          ),
+          Expanded(child: WebViewWidget(controller: _controller)),
+        ],
       ),
     );
   }

@@ -1,3 +1,4 @@
+import 'package:first_app/core/services/auth_storage_service.dart';
 import 'package:first_app/core/services/backend_api_service.dart';
 import 'package:first_app/core/theme/app_colors.dart';
 import 'package:first_app/core/theme/app_text_styles.dart';
@@ -18,6 +19,7 @@ class MedicalProfileSetupPage extends StatefulWidget {
 
 class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
   final BackendApiService _backendApiService = BackendApiService.instance;
+  final AuthStorageService _authStorageService = AuthStorageService.instance;
 
   bool? isFemale;
   bool isSubmitting = false;
@@ -106,6 +108,16 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
     super.dispose();
   }
 
+  String _firstNonEmptyString(List<dynamic> values) {
+    for (final dynamic value in values) {
+      final String text = (value ?? '').toString().trim();
+      if (text.isNotEmpty && text.toLowerCase() != 'null') {
+        return text;
+      }
+    }
+    return '';
+  }
+
   Future<void> _onSubmitProfile() async {
     if (isSubmitting) {
       return;
@@ -143,13 +155,45 @@ class _MedicalProfileSetupPageState extends State<MedicalProfileSetupPage> {
       final String dateOfBirth =
           '${selectedBirthDate!.year.toString().padLeft(4, '0')}-${selectedBirthDate!.month.toString().padLeft(2, '0')}-${selectedBirthDate!.day.toString().padLeft(2, '0')}';
 
-      await _backendApiService.registerPatient(
-        phoneNumber: phoneNumber,
-        password: password,
-        fullName: fullName,
-        gender: gender,
-        dateOfBirth: dateOfBirth,
-      );
+      final Map<String, dynamic> response = await _backendApiService
+          .registerPatient(
+            phoneNumber: phoneNumber,
+            password: password,
+            fullName: fullName,
+            gender: gender,
+            dateOfBirth: dateOfBirth,
+          );
+
+      final Map<String, dynamic> data =
+          (response['data'] as Map<String, dynamic>?) ?? response;
+      final String accessToken = _firstNonEmptyString(<dynamic>[
+        data['accessToken'],
+        response['accessToken'],
+      ]);
+      final String refreshToken = _firstNonEmptyString(<dynamic>[
+        data['refreshToken'],
+        response['refreshToken'],
+      ]);
+      final String userId = _firstNonEmptyString(<dynamic>[
+        data['userId'],
+        data['id'],
+        response['userId'],
+        response['id'],
+      ]);
+      final String role = _firstNonEmptyString(<dynamic>[
+        data['role'],
+        response['role'],
+        'PATIENT',
+      ]);
+
+      if (accessToken.isNotEmpty && refreshToken.isNotEmpty) {
+        await _authStorageService.saveSession(
+          accessToken: accessToken,
+          refreshToken: refreshToken,
+          userId: userId,
+          role: role,
+        );
+      }
 
       if (!mounted) {
         return;

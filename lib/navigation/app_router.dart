@@ -1,4 +1,5 @@
 import 'package:first_app/navigation/app_routes.dart';
+import 'package:first_app/screens/auth/forgot_password_page.dart';
 import 'package:first_app/screens/auth/login_prototype_page.dart';
 import 'package:first_app/screens/home/home_page.dart';
 import 'package:first_app/screens/auth/register_page.dart';
@@ -55,6 +56,11 @@ class AppRouter {
             title: args.title,
             continueToProfileSetup: args.continueToProfileSetup,
           ),
+          settings: settings,
+        );
+      case AppRoutes.forgotPassword:
+        return MaterialPageRoute<void>(
+          builder: (_) => const ForgotPasswordPage(),
           settings: settings,
         );
       case AppRoutes.medicalProfileSetup:

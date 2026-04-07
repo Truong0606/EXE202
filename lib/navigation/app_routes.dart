@@ -1,6 +1,7 @@
 class AppRoutes {
   static const String login = '/';
   static const String register = '/register';
+  static const String forgotPassword = '/forgot-password';
   static const String medicalProfileSetup = '/medical-profile-setup';
   static const String profileGreeting = '/profile-greeting';
   static const String onboardingIntro = '/onboarding-intro';

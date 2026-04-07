@@ -36,17 +36,20 @@ class ReadyStartPage extends StatelessWidget {
               PrimaryPillButton(
                 label: 'Bắt đầu ngay',
                 onPressed: () {
-                  Navigator.of(context).pushNamedAndRemoveUntil(
-                    AppRoutes.login,
-                    (route) => false,
-                  );
+                  Navigator.of(
+                    context,
+                  ).pushNamedAndRemoveUntil(AppRoutes.home, (route) => false);
                 },
               ),
               const SizedBox(height: 12),
               SizedBox(
                 width: double.infinity,
                 child: OutlinedButton(
-                  onPressed: () {},
+                  onPressed: () {
+                    Navigator.of(
+                      context,
+                    ).pushNamedAndRemoveUntil(AppRoutes.home, (route) => false);
+                  },
                   style: OutlinedButton.styleFrom(
                     side: const BorderSide(
                       color: AppColors.lightBlue,

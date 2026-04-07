@@ -1,4 +1,3 @@
-import 'package:first_app/core/models/dashboard_models.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class AccountSettingsService {
@@ -9,8 +8,8 @@ class AccountSettingsService {
   static const String _notificationsEnabledKey =
       'account_notifications_enabled';
   static const String _remindersEnabledKey = 'account_reminders_enabled';
-  static const String _profileNameKey = 'account_profile_name';
-  static const String _profileEmailKey = 'account_profile_email';
+    static const String _paymentPromoShownAtPrefix =
+      'account_payment_promo_shown_at_';
 
   Future<bool> getNotificationsEnabled() async {
     final SharedPreferences prefs = await SharedPreferences.getInstance();
@@ -32,23 +31,32 @@ class AccountSettingsService {
     await prefs.setBool(_remindersEnabledKey, value);
   }
 
-  Future<UserProfileData> applyProfileOverrides(UserProfileData profile) async {
-    final SharedPreferences prefs = await SharedPreferences.getInstance();
-    final String storedName = (prefs.getString(_profileNameKey) ?? '').trim();
-    final String storedEmail = (prefs.getString(_profileEmailKey) ?? '').trim();
+  Future<DateTime?> getPaymentPromoShownAt(String userKey) async {
+    final String normalizedKey = userKey.trim();
+    if (normalizedKey.isEmpty) {
+      return null;
+    }
 
-    return profile.copyWith(
-      fullName: storedName.isEmpty ? null : storedName,
-      email: storedEmail.isEmpty ? null : storedEmail,
-    );
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    final String storedValue =
+        prefs.getString('$_paymentPromoShownAtPrefix$normalizedKey') ?? '';
+    if (storedValue.trim().isEmpty) {
+      return null;
+    }
+
+    return DateTime.tryParse(storedValue);
   }
 
-  Future<void> saveProfileOverrides({
-    required String fullName,
-    String? email,
-  }) async {
+  Future<void> setPaymentPromoShownAt(String userKey, DateTime shownAt) async {
+    final String normalizedKey = userKey.trim();
+    if (normalizedKey.isEmpty) {
+      return;
+    }
+
     final SharedPreferences prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_profileNameKey, fullName.trim());
-    await prefs.setString(_profileEmailKey, (email ?? '').trim());
+    await prefs.setString(
+      '$_paymentPromoShownAtPrefix$normalizedKey',
+      shownAt.toIso8601String(),
+    );
   }
 }
