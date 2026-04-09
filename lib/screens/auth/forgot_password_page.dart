@@ -263,7 +263,6 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
                 decoration: InputDecoration(
                   filled: true,
                   fillColor: Colors.white,
-                  hintText: 'Tối thiểu 6 ký tự',
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(14),
                     borderSide: BorderSide.none,

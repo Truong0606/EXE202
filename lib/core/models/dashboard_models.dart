@@ -288,6 +288,41 @@ class PaymentHistoryItemData {
   final bool isActive;
   final Map<String, dynamic> rawData;
 
+  static String normalizePackageType(String? rawValue) {
+    final String value = (rawValue ?? '').trim().toUpperCase();
+    if (value.isEmpty) {
+      return '';
+    }
+
+    if (value == 'M' ||
+        value.contains('MONTH') ||
+        value.contains('THANG') ||
+        value == '30D' ||
+        value == '1M') {
+      return 'M';
+    }
+
+    if (value == 'Y' ||
+        value.contains('YEAR') ||
+        value.contains('ANNUAL') ||
+        value.contains('NAM') ||
+        value == '12M' ||
+        value == '365D') {
+      return 'Y';
+    }
+
+    if (value == 'L' ||
+        value.contains('LIFE') ||
+        value.contains('FOREVER') ||
+        value.contains('VINH VIEN') ||
+        value.contains('TRON DOI') ||
+        value.contains('PERMANENT')) {
+      return 'L';
+    }
+
+    return value;
+  }
+
   factory PaymentHistoryItemData.fromJson(Map<String, dynamic> json) {
     String? firstNonEmpty(List<dynamic> values) {
       for (final dynamic value in values) {
@@ -335,15 +370,20 @@ class PaymentHistoryItemData {
           json['subscriptionStatus'],
         ])?.toUpperCase() ??
         'UNKNOWN';
-    final String packageType =
-        firstNonEmpty(<dynamic>[
-          json['packageType'],
-          json['package'],
-          json['packageCode'],
-          json['subscriptionType'],
-          json['planCode'],
-        ])?.toUpperCase() ??
-        '';
+    final String packageType = normalizePackageType(
+      firstNonEmpty(<dynamic>[
+        json['packageType'],
+        json['package'],
+        json['packageCode'],
+        json['subscriptionType'],
+        json['planCode'],
+        json['packageName'],
+        json['planName'],
+        json['subscriptionName'],
+        json['durationType'],
+        json['duration'],
+      ]),
+    );
     final DateTime? expiresAt = parseDate(
       json['expiresAt'] ?? json['expiredAt'] ?? json['endDate'],
     );

@@ -192,8 +192,10 @@ class _HomePageState extends State<HomePage> {
   bool _hasLikelyActivePayment(List<PaymentHistoryItemData> history) {
     final DateTime now = DateTime.now();
     for (final PaymentHistoryItemData item in history) {
+      final String normalizedPackageType =
+          PaymentHistoryItemData.normalizePackageType(item.packageType);
       final bool lifetimeActive =
-          item.packageType == 'L' && item.status == 'SUCCESS';
+          normalizedPackageType == 'L' && item.status == 'SUCCESS';
       final bool expiryActive =
           item.expiresAt != null && item.expiresAt!.isAfter(now);
       if (item.isActive || lifetimeActive || expiryActive) {
@@ -255,7 +257,17 @@ class _HomePageState extends State<HomePage> {
             context: context,
             builder: (BuildContext dialogContext) {
               return AlertDialog(
-                title: const Text('Nâng cấp Premium'),
+                titlePadding: const EdgeInsets.fromLTRB(24, 20, 12, 0),
+                title: Row(
+                  children: [
+                    const Expanded(child: Text('Nâng cấp Premium')),
+                    IconButton(
+                      onPressed: () => Navigator.of(dialogContext).pop(false),
+                      icon: const Icon(Icons.close_rounded),
+                      tooltip: 'Đóng',
+                    ),
+                  ],
+                ),
                 content: const Text(
                   'Mở khóa gói Premium để xem lịch sử thanh toán, theo dõi trạng thái kích hoạt và thanh toán ngay trong ứng dụng.',
                 ),
@@ -373,6 +385,7 @@ class _HomePageState extends State<HomePage> {
               onRetry: _refreshHomeData,
             ),
             _AccountTab(
+              isActive: currentTabIndex == 4,
               profile: _currentUserProfile,
               onProfileUpdated: _handleProfileUpdated,
             ),
@@ -1605,8 +1618,13 @@ class _HomeBottomNav extends StatelessWidget {
 }
 
 class _AccountTab extends StatefulWidget {
-  const _AccountTab({this.profile, required this.onProfileUpdated});
+  const _AccountTab({
+    required this.isActive,
+    this.profile,
+    required this.onProfileUpdated,
+  });
 
+  final bool isActive;
   final UserProfileData? profile;
   final ValueChanged<UserProfileData> onProfileUpdated;
 
@@ -1626,6 +1644,7 @@ class _AccountTabState extends State<_AccountTab> {
   bool _remindersEnabled = true;
   bool _isProfileMessageError = false;
   String? _profileMessage;
+  _PremiumProfileTitleData? _premiumTitle;
   UserProfileData? _profile;
 
   @override
@@ -1642,6 +1661,12 @@ class _AccountTabState extends State<_AccountTab> {
         _profile = widget.profile;
         _isLoadingProfile = false;
       });
+      unawaited(_loadPremiumTitle());
+      return;
+    }
+
+    if (!oldWidget.isActive && widget.isActive) {
+      unawaited(_loadPremiumTitle());
     }
   }
 
@@ -1660,6 +1685,40 @@ class _AccountTabState extends State<_AccountTab> {
       _profile = widget.profile;
       _isLoadingProfile = false;
     });
+
+    unawaited(_loadPremiumTitle());
+  }
+
+  Future<void> _loadPremiumTitle() async {
+    final UserProfileData? profile = _profile ?? widget.profile;
+    if (profile == null) {
+      if (mounted) {
+        setState(() {
+          _premiumTitle = null;
+        });
+      }
+      return;
+    }
+
+    try {
+      final List<PaymentHistoryItemData> history = await _backendApiService
+          .fetchPaymentHistory(page: 1, limit: 20);
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _premiumTitle = _derivePremiumProfileTitle(history);
+      });
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _premiumTitle = null;
+      });
+    }
   }
 
   Future<void> _logout() async {
@@ -1835,14 +1894,18 @@ class _AccountTabState extends State<_AccountTab> {
             builder: (_) => _PaymentSettingsPage(profile: seedProfile),
           ),
         );
-    if (!mounted || updatedProfile == null) {
+    if (!mounted) {
       return;
     }
 
-    setState(() {
-      _profile = updatedProfile;
-    });
-    widget.onProfileUpdated(updatedProfile);
+    if (updatedProfile != null) {
+      setState(() {
+        _profile = updatedProfile;
+      });
+      widget.onProfileUpdated(updatedProfile);
+    }
+
+    await _loadPremiumTitle();
   }
 
   Future<void> _showInfoDialog({
@@ -2036,6 +2099,7 @@ class _AccountTabState extends State<_AccountTab> {
     final String phoneNumber = (_profile?.phoneNumber ?? '').trim();
     final String email = (_profile?.email ?? '').trim();
     final String roleLabel = _roleLabel(_profile?.role);
+    final _PremiumProfileTitleData? premiumTitle = _premiumTitle;
 
     return Container(
       color: const Color(0xFFDDF2FB),
@@ -2154,7 +2218,64 @@ class _AccountTabState extends State<_AccountTab> {
                                     fontWeight: FontWeight.w600,
                                   ),
                                 ),
-                                const SizedBox(height: 6),
+                                if (premiumTitle != null) ...[
+                                  const SizedBox(height: 6),
+                                  Container(
+                                    width: double.infinity,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 8,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0x26FFE38A),
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(
+                                        color: const Color(0x66FFE38A),
+                                      ),
+                                    ),
+                                    child: Row(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        const Padding(
+                                          padding: EdgeInsets.only(top: 1),
+                                          child: Icon(
+                                            Icons.workspace_premium_rounded,
+                                            color: Color(0xFFFFF4C2),
+                                            size: 16,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                'Danh hiệu: ${premiumTitle.label}',
+                                                style: const TextStyle(
+                                                  color: Color(0xFFFFF4C2),
+                                                  fontSize: 12,
+                                                  fontWeight: FontWeight.w800,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 2),
+                                              Text(
+                                                premiumTitle.validityText,
+                                                style: const TextStyle(
+                                                  color: Color(0xFFFFF4C2),
+                                                  fontSize: 11,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ] else
+                                  const SizedBox(height: 6),
                                 const Text(
                                   'Chạm biểu tượng máy ảnh để thay ảnh đại diện',
                                   style: TextStyle(
@@ -2346,6 +2467,166 @@ class _AccountTabState extends State<_AccountTab> {
         ),
       ),
     );
+  }
+}
+
+class _PremiumProfileTitleData {
+  const _PremiumProfileTitleData({
+    required this.label,
+    required this.validityText,
+  });
+
+  final String label;
+  final String validityText;
+}
+
+DateTime? _resolvePremiumExpiry(PaymentHistoryItemData item) {
+  final String normalizedPackageType =
+      PaymentHistoryItemData.normalizePackageType(item.packageType);
+
+  if (normalizedPackageType == 'L') {
+    return null;
+  }
+
+  if (item.expiresAt != null) {
+    return item.expiresAt;
+  }
+
+  final DateTime? purchaseTime = item.paidAt ?? item.createdAt;
+  if (purchaseTime == null) {
+    return null;
+  }
+
+  switch (normalizedPackageType) {
+    case 'M':
+      return DateTime(
+        purchaseTime.year,
+        purchaseTime.month + 1,
+        purchaseTime.day,
+        purchaseTime.hour,
+        purchaseTime.minute,
+        purchaseTime.second,
+        purchaseTime.millisecond,
+        purchaseTime.microsecond,
+      );
+    case 'Y':
+      return DateTime(
+        purchaseTime.year + 1,
+        purchaseTime.month,
+        purchaseTime.day,
+        purchaseTime.hour,
+        purchaseTime.minute,
+        purchaseTime.second,
+        purchaseTime.millisecond,
+        purchaseTime.microsecond,
+      );
+    default:
+      return null;
+  }
+}
+
+bool _isPremiumPaymentActive(PaymentHistoryItemData item) {
+  final String status = item.status.toUpperCase();
+  final String normalizedPackageType =
+      PaymentHistoryItemData.normalizePackageType(item.packageType);
+  if (status != 'SUCCESS' && status != 'ACTIVE') {
+    return false;
+  }
+
+  if (item.isActive) {
+    return true;
+  }
+
+  if (normalizedPackageType == 'L') {
+    return true;
+  }
+
+  final DateTime? expiry = _resolvePremiumExpiry(item);
+  return expiry != null && expiry.isAfter(DateTime.now());
+}
+
+PaymentHistoryItemData? _findActivePremiumPayment(
+  List<PaymentHistoryItemData> history,
+) {
+  for (final PaymentHistoryItemData item in history) {
+    if (_isPremiumPaymentActive(item)) {
+      return item;
+    }
+  }
+  return null;
+}
+
+PaymentHistoryItemData? _findLatestSuccessfulPremiumPayment(
+  List<PaymentHistoryItemData> history,
+) {
+  for (final PaymentHistoryItemData item in history) {
+    final String status = item.status.toUpperCase();
+    if (status == 'SUCCESS' || status == 'ACTIVE') {
+      return item;
+    }
+  }
+  return null;
+}
+
+String _formatPremiumValidityDate(DateTime value) {
+  final DateTime local = value.toLocal();
+  final String day = local.day.toString().padLeft(2, '0');
+  final String month = local.month.toString().padLeft(2, '0');
+  final String year = local.year.toString();
+  return '$day/$month/$year';
+}
+
+_PremiumProfileTitleData? _derivePremiumProfileTitle(
+  List<PaymentHistoryItemData> history,
+) {
+  final PaymentHistoryItemData? paymentForTitle =
+      _findActivePremiumPayment(history) ??
+      _findLatestSuccessfulPremiumPayment(history);
+  if (paymentForTitle == null) {
+    return null;
+  }
+
+  final String normalizedPackageType =
+      PaymentHistoryItemData.normalizePackageType(paymentForTitle.packageType);
+
+  switch (normalizedPackageType) {
+    case 'M':
+      final DateTime? expiry = _resolvePremiumExpiry(paymentForTitle);
+      if (expiry == null || !expiry.isAfter(DateTime.now())) {
+        return const _PremiumProfileTitleData(
+          label: 'Premium',
+          validityText: 'Tài khoản Premium đang hoạt động',
+        );
+      }
+      return _PremiumProfileTitleData(
+        label: 'Premium Tháng',
+        validityText: 'Hiệu lực đến ${_formatPremiumValidityDate(expiry)}',
+      );
+    case 'Y':
+      final DateTime? expiry = _resolvePremiumExpiry(paymentForTitle);
+      if (expiry == null || !expiry.isAfter(DateTime.now())) {
+        return const _PremiumProfileTitleData(
+          label: 'Premium',
+          validityText: 'Tài khoản Premium đang hoạt động',
+        );
+      }
+      return _PremiumProfileTitleData(
+        label: 'Premium Năm',
+        validityText: 'Hiệu lực đến ${_formatPremiumValidityDate(expiry)}',
+      );
+    case 'L':
+      return const _PremiumProfileTitleData(
+        label: 'Premium Trọn Đời',
+        validityText: 'Danh hiệu trọn đời đang hoạt động',
+      );
+    default:
+      final DateTime? expiry = _resolvePremiumExpiry(paymentForTitle);
+      return _PremiumProfileTitleData(
+        label: 'Premium',
+        validityText: expiry != null && expiry.isAfter(DateTime.now())
+            ? 'Hiệu lực đến ${_formatPremiumValidityDate(expiry)}'
+            : 'Tài khoản Premium đang hoạt động',
+      );
   }
 }
 
@@ -3199,8 +3480,10 @@ class _PaymentSettingsPageState extends State<_PaymentSettingsPage> {
   PaymentHistoryItemData? get _activePayment {
     final DateTime now = DateTime.now();
     for (final PaymentHistoryItemData item in _paymentHistory) {
+      final String normalizedPackageType =
+          PaymentHistoryItemData.normalizePackageType(item.packageType);
       final bool lifetimeActive =
-          item.packageType == 'L' && item.status == 'SUCCESS';
+          normalizedPackageType == 'L' && item.status == 'SUCCESS';
       final bool expiryActive =
           item.expiresAt != null && item.expiresAt!.isAfter(now);
       if (item.isActive || lifetimeActive || expiryActive) {
@@ -3217,10 +3500,15 @@ class _PaymentSettingsPageState extends State<_PaymentSettingsPage> {
   }
 
   String _planLabel(String packageType) {
+    final String normalizedPackageType =
+        PaymentHistoryItemData.normalizePackageType(packageType);
     final _PaymentPlanInfo? plan = _plans
-        .where((_PaymentPlanInfo item) => item.packageType == packageType)
+        .where(
+          (_PaymentPlanInfo item) => item.packageType == normalizedPackageType,
+        )
         .firstOrNull;
-    return plan?.title ?? packageType;
+    return plan?.title ??
+        (packageType.trim().isEmpty ? 'Premium' : packageType);
   }
 
   String _statusLabel(String status) {
@@ -3297,6 +3585,11 @@ class _PaymentSettingsPageState extends State<_PaymentSettingsPage> {
     return '$day/$month/$year $hour:$minute';
   }
 
+  bool _shouldDisplayHistoryItem(PaymentHistoryItemData item) {
+    final String status = item.status.toUpperCase();
+    return status == 'PENDING' || status == 'SUCCESS';
+  }
+
   Future<void> _loadPaymentHistory() async {
     setState(() {
       _isLoading = true;
@@ -3310,7 +3603,9 @@ class _PaymentSettingsPageState extends State<_PaymentSettingsPage> {
         return;
       }
       setState(() {
-        _paymentHistory = history;
+        _paymentHistory = history
+            .where(_shouldDisplayHistoryItem)
+            .toList(growable: false);
       });
     } catch (error) {
       if (!mounted) {
@@ -3716,7 +4011,10 @@ class _PaymentSettingsPageState extends State<_PaymentSettingsPage> {
         : 'Gói hiện tại: ${_planLabel(activePayment.packageType)}';
     final String activeSubtitle = activePayment == null
         ? 'Bạn có thể chọn gói tháng, năm hoặc trọn đời và thanh toán ngay trong app.'
-        : activePayment.packageType == 'L'
+        : PaymentHistoryItemData.normalizePackageType(
+                activePayment.packageType,
+              ) ==
+              'L'
         ? 'Gói trọn đời đang hoạt động trên tài khoản này.'
         : activePayment.expiresAt != null
         ? 'Hiệu lực đến ${_formatDateTime(activePayment.expiresAt)}.'
@@ -3784,15 +4082,6 @@ class _PaymentSettingsPageState extends State<_PaymentSettingsPage> {
                   color: Color(0xFF17324F),
                   fontSize: 18,
                   fontWeight: FontWeight.w800,
-                ),
-              ),
-              const SizedBox(height: 10),
-              const Text(
-                'M: 50.000 VND, Y: 450.000 VND, L: 1.000.000 VND. Sau khi khởi tạo, trang thanh toán sẽ mở ngay trong app.',
-                style: TextStyle(
-                  color: Color(0xFF5E7688),
-                  fontSize: 13,
-                  height: 1.4,
                 ),
               ),
               const SizedBox(height: 16),
